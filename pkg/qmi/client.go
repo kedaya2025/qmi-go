@@ -9,7 +9,6 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -72,6 +71,11 @@ type ClientOptions struct {
 	DefaultRequestTimeout time.Duration
 	TxQueueSize           int
 	IndicationQueueSize   int
+	UseProxy              bool
+	ProxyPath             string
+	ProxyExecutable       string
+	ProxyOpenTimeout      time.Duration
+	ProxyFallbackToRaw    bool
 	Logf                  ClientLogFunc
 }
 
@@ -83,6 +87,9 @@ func DefaultClientOptions() ClientOptions {
 		DefaultRequestTimeout: 30 * time.Second,
 		TxQueueSize:           128,
 		IndicationQueueSize:   256,
+		ProxyPath:             defaultProxyPath,
+		ProxyExecutable:       defaultProxyExecutable,
+		ProxyOpenTimeout:      defaultProxyOpenTimeout,
 	}
 }
 
@@ -134,7 +141,7 @@ const (
 // ============================================================================
 
 type Client struct {
-	file *os.File
+	conn qmiTransport
 	path string
 	opts ClientOptions
 
@@ -182,6 +189,15 @@ func normalizeClientOptions(opts ClientOptions) ClientOptions {
 	if opts.IndicationQueueSize <= 0 {
 		opts.IndicationQueueSize = defaults.IndicationQueueSize
 	}
+	if opts.ProxyPath == "" {
+		opts.ProxyPath = defaults.ProxyPath
+	}
+	if opts.ProxyExecutable == "" {
+		opts.ProxyExecutable = defaults.ProxyExecutable
+	}
+	if opts.ProxyOpenTimeout <= 0 {
+		opts.ProxyOpenTimeout = defaults.ProxyOpenTimeout
+	}
 	// Preserve backwards-compatible zero-value construction while still allowing explicit false
 	// when at least one other option is set.
 	if !opts.SyncOnOpen &&
@@ -202,18 +218,91 @@ func (c *Client) logf(level ClientLogLevel, format string, args ...any) {
 	log.Printf(format, args...)
 }
 
+func logClientOption(opts ClientOptions, level ClientLogLevel, format string, args ...any) {
+	if opts.Logf != nil {
+		opts.Logf(level, format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
 // NewClientWithOptions creates a new QMI client connected to the given device path.
 func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) (*Client, error) {
 	opts = normalizeClientOptions(opts)
-
-	// Open like C version: O_RDWR | O_NONBLOCK | O_NOCTTY / 像C版本一样打开: O_RDWR | O_NONBLOCK | O_NOCTTY
-	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open QMI device %s: %w", path, err)
+	openCtx := ctx
+	if openCtx == nil {
+		openCtx = context.Background()
+	}
+	if _, hasDeadline := openCtx.Deadline(); !hasDeadline && opts.UseProxy && opts.ProxyOpenTimeout > 0 {
+		var cancel context.CancelFunc
+		openCtx, cancel = context.WithTimeout(openCtx, opts.ProxyOpenTimeout)
+		defer cancel()
 	}
 
+	var (
+		conn qmiTransport
+		err  error
+	)
+	if opts.UseProxy {
+		conn, err = openProxyTransportHook(openCtx, opts)
+		if err != nil && opts.ProxyFallbackToRaw {
+			logClientOption(opts, ClientLogLevelWarn, "QMI: qmi-proxy transport unavailable, falling back to raw QMI for %s: %v", path, err)
+			opts.UseProxy = false
+			conn, err = openRawTransportHook(path)
+			if err != nil {
+				return nil, fmt.Errorf("qmi-proxy unavailable and raw QMI fallback failed for %s: %w", path, err)
+			}
+		}
+	} else {
+		conn, err = openRawTransportHook(path)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	c := newClientWithTransport(path, opts, conn)
+
+	if opts.UseProxy {
+		if err := c.openProxyDevice(openCtx, path); err != nil {
+			if opts.ProxyFallbackToRaw {
+				_ = c.Close()
+				logClientOption(opts, ClientLogLevelWarn, "QMI: qmi-proxy failed to open device %s, falling back to raw QMI: %v", path, err)
+				fallbackOpts := opts
+				fallbackOpts.UseProxy = false
+				conn, rawErr := openRawTransportHook(path)
+				if rawErr != nil {
+					return nil, fmt.Errorf("qmi-proxy device open failed for %s: %v; raw QMI fallback failed: %w", path, err, rawErr)
+				}
+				c = newClientWithTransport(path, fallbackOpts, conn)
+			} else {
+				_ = c.Close()
+				return nil, err
+			}
+		}
+	}
+
+	// Initial sync (non-fatal, helps clear modem state) / 初始同步 (非致命，有助于清除modem状态)
+	if opts.SyncOnOpen {
+		syncCtx := ctx
+		if syncCtx == nil {
+			syncCtx = context.Background()
+		}
+		if _, hasDeadline := syncCtx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			syncCtx, cancel = context.WithTimeout(syncCtx, 5*time.Second)
+			defer cancel()
+		}
+		if err := c.Sync(syncCtx); err != nil {
+			c.logf(ClientLogLevelDebug, "QMI: initial sync failed (non-fatal): %v", err)
+		}
+	}
+
+	return c, nil
+}
+
+func newClientWithTransport(path string, opts ClientOptions, conn qmiTransport) *Client {
 	c := &Client{
-		file:               f,
+		conn:               conn,
 		path:               path,
 		opts:               opts,
 		transactions:       make(map[uint32]*transactionEntry),
@@ -235,23 +324,7 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 	go c.writerLoop()
 	go c.indicationLoop()
 
-	// Initial sync (non-fatal, helps clear modem state) / 初始同步 (非致命，有助于清除modem状态)
-	if opts.SyncOnOpen {
-		syncCtx := ctx
-		if syncCtx == nil {
-			syncCtx = context.Background()
-		}
-		if _, hasDeadline := syncCtx.Deadline(); !hasDeadline {
-			var cancel context.CancelFunc
-			syncCtx, cancel = context.WithTimeout(syncCtx, 5*time.Second)
-			defer cancel()
-		}
-		if err := c.Sync(syncCtx); err != nil {
-			c.logf(ClientLogLevelDebug, "QMI: initial sync failed (non-fatal): %v", err)
-		}
-	}
-
-	return c, nil
+	return c
 }
 
 // Close shuts down the client / Close关闭客户端
@@ -259,7 +332,7 @@ func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		close(c.closeCh)
-		err = c.file.Close()
+		err = c.conn.Close()
 		c.wg.Wait()
 		c.failPendingTransactions(fmt.Errorf("client closed"))
 		close(c.eventCh)
@@ -405,9 +478,9 @@ func (c *Client) readLoop() {
 		}
 
 		// Set read deadline to allow periodic checking of closeCh / 设置读取截止时间以允许定期检查closeCh
-		_ = c.file.SetReadDeadline(time.Now().Add(c.opts.ReadDeadline))
+		_ = c.conn.SetReadDeadline(time.Now().Add(c.opts.ReadDeadline))
 
-		n, err := c.file.Read(buf)
+		n, err := c.conn.Read(buf)
 		if err != nil {
 			if os.IsTimeout(err) {
 				continue
@@ -547,7 +620,7 @@ func (c *Client) deliverEvent(evt Event) bool {
 func (c *Client) writeAll(data []byte) error {
 	written := 0
 	for written < len(data) {
-		n, err := c.file.Write(data[written:])
+		n, err := c.conn.Write(data[written:])
 		if err != nil {
 			return fmt.Errorf("write failed: %w", err)
 		}
@@ -851,6 +924,19 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 func (c *Client) Sync(ctx context.Context) error {
 	_, err := c.SendRequest(ctx, ServiceControl, 0, 0x0027, nil) // 0x0027 = QMICTL_SYNC_REQ
 	return err
+}
+
+func (c *Client) openProxyDevice(ctx context.Context, devicePath string) error {
+	resp, err := c.SendRequest(ctx, ServiceControl, 0, CTLInternalProxyOpen, []TLV{
+		NewTLVString(TLVProxyDevicePath, devicePath),
+	})
+	if err != nil {
+		return fmt.Errorf("qmi-proxy open %s: %w", devicePath, err)
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("qmi-proxy open %s: %w", devicePath, err)
+	}
+	return nil
 }
 
 // AllocateClientID requests a client ID for the given service / AllocateClientID为给定服务请求客户端ID

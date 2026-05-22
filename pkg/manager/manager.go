@@ -412,6 +412,15 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.ClientOptions.IndicationQueueSize <= 0 {
 		cfg.ClientOptions.IndicationQueueSize = defaultClientOpts.IndicationQueueSize
 	}
+	if cfg.ClientOptions.ProxyPath == "" {
+		cfg.ClientOptions.ProxyPath = defaultClientOpts.ProxyPath
+	}
+	if cfg.ClientOptions.ProxyExecutable == "" {
+		cfg.ClientOptions.ProxyExecutable = defaultClientOpts.ProxyExecutable
+	}
+	if cfg.ClientOptions.ProxyOpenTimeout <= 0 {
+		cfg.ClientOptions.ProxyOpenTimeout = defaultClientOpts.ProxyOpenTimeout
+	}
 	if !cfg.ClientOptions.SyncOnOpen &&
 		cfg.ClientOptions.ReadDeadline == defaultClientOpts.ReadDeadline &&
 		cfg.ClientOptions.DefaultRequestTimeout == defaultClientOpts.DefaultRequestTimeout &&
