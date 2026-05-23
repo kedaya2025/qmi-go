@@ -19,7 +19,7 @@ func withUIMRecoveryValue[T any](m *Manager, op string, fn func(uim *qmi.UIMServ
 
 	uim, err := m.ensureUIMService()
 	if err != nil {
-		if m.shouldRecoverUIMError(err) {
+		if m.shouldRecoverUIMError(op, err) {
 			m.triggerCoreRecoveryFromService("UIM", op, "initial", err)
 		}
 		return zero, err
@@ -27,9 +27,10 @@ func withUIMRecoveryValue[T any](m *Manager, op string, fn func(uim *qmi.UIMServ
 
 	result, err := fn(uim)
 	if err == nil {
+		m.noteServiceOperationSuccess("UIM", op)
 		return result, nil
 	}
-	if !m.shouldRecoverUIMError(err) {
+	if !m.shouldRecoverUIMError(op, err) {
 		return result, err
 	}
 
@@ -46,10 +47,11 @@ func withUIMRecoveryValue[T any](m *Manager, op string, fn func(uim *qmi.UIMServ
 
 	retryResult, retryErr := fn(uim)
 	if retryErr == nil {
+		m.noteServiceOperationSuccess("UIM", op)
 		m.log.WithField("service_name", "UIM").WithField("op", op).WithField("phase", "retry").Info("UIM operation recovered after rebind")
 		return retryResult, nil
 	}
-	if m.shouldRecoverUIMError(retryErr) {
+	if m.shouldRecoverUIMError(op, retryErr) {
 		m.logServiceRecovery("UIM", op, "retry", retryErr, "UIM operation still failing after rebind")
 		m.triggerCoreRecoveryFromService("UIM", op, "retry", retryErr)
 	}
@@ -155,8 +157,8 @@ func (m *Manager) rebindUIMService(reason string) (*qmi.UIMService, error) {
 	return allocated, nil
 }
 
-func (m *Manager) shouldRecoverUIMError(err error) bool {
-	return shouldRecoverServiceError("UIM", err, "uim service not available")
+func (m *Manager) shouldRecoverUIMError(op string, err error) bool {
+	return m.shouldRecoverServiceOperationError("UIM", op, err, "uim service not available")
 }
 
 func (m *Manager) triggerCoreRecoveryFromUIM(op string, phase string, cause error) {

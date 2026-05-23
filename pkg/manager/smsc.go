@@ -52,28 +52,40 @@ func (m *Manager) querySMSCFromDevice(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
-	m.mu.RLock()
-	uim := m.uim
-	m.mu.RUnlock()
-	if uim == nil {
-		return "", ErrServiceNotReady("UIM")
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if m.sendAPDUHook == nil {
+		if _, err := withUIMRecoveryValue(m, "GetSMSC.EnsureUIM", func(uim *qmi.UIMService) (struct{}, error) {
+			return struct{}{}, nil
+		}); err != nil {
+			return "", err
+		}
 	}
 
 	txBasic := func(command []byte) ([]byte, error) {
-		return uim.SendAPDU(ctx, smscAPDUSlot, 0, command)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return m.SendAPDUContext(ctx, smscAPDUSlot, 0, command)
 	}
 	smsc, errBasic := getSMSCFromUIM(txBasic)
 	if strings.TrimSpace(smsc) != "" {
 		return strings.TrimSpace(smsc), nil
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
-	smsc, errLogical := getSMSCFromUIMLogicalChannel(ctx, uim)
+	smsc, errLogical := m.getSMSCFromUIMLogicalChannel(ctx)
 	if strings.TrimSpace(smsc) != "" {
 		return strings.TrimSpace(smsc), nil
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
-	smsc, errFile := getSMSCFromUIMFiles(ctx, uim)
+	smsc, errFile := getSMSCFromUIMFiles(ctx, managerUIMFileReader{m: m})
 	if strings.TrimSpace(smsc) != "" {
 		return strings.TrimSpace(smsc), nil
 	}
@@ -160,19 +172,22 @@ func selectUSIMOrFallback(tx apduSender) error {
 	return nil
 }
 
-func getSMSCFromUIMLogicalChannel(ctx context.Context, uim *qmi.UIMService) (string, error) {
-	channel, err := uim.OpenLogicalChannel(ctx, smscAPDUSlot, genericUSIMAID)
+func (m *Manager) getSMSCFromUIMLogicalChannel(ctx context.Context) (string, error) {
+	channel, err := m.OpenLogicalChannelContext(ctx, smscAPDUSlot, genericUSIMAID)
 	if err != nil {
 		return "", fmt.Errorf("open USIM logical channel failed: %w", err)
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_ = uim.CloseLogicalChannel(closeCtx, smscAPDUSlot, channel)
+		_ = m.CloseLogicalChannelContext(closeCtx, smscAPDUSlot, channel)
 	}()
 
 	tx := func(command []byte) ([]byte, error) {
-		return uim.SendAPDU(ctx, smscAPDUSlot, channel, command)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return m.SendAPDUContext(ctx, smscAPDUSlot, channel, command)
 	}
 	smsc, err := getSMSCFromSelectedFiles(tx)
 	if strings.TrimSpace(smsc) != "" {
@@ -190,9 +205,28 @@ type uimFileReader interface {
 	ReadTransparentWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8) ([]byte, error)
 }
 
+type managerUIMFileReader struct {
+	m *Manager
+}
+
+func (r managerUIMFileReader) GetFileAttributesWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8) (*qmi.UIMFileAttributes, error) {
+	return r.m.UIMGetFileAttributesWithSession(ctx, sessionType, fileID, path)
+}
+
+func (r managerUIMFileReader) ReadRecordWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8, recordNumber uint16, recordLength uint16) (*qmi.UIMRecordData, error) {
+	return r.m.UIMReadRecordWithSession(ctx, sessionType, fileID, path, recordNumber, recordLength)
+}
+
+func (r managerUIMFileReader) ReadTransparentWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8) ([]byte, error) {
+	return r.m.UIMReadTransparentWithSession(ctx, sessionType, fileID, path)
+}
+
 func getSMSCFromUIMFiles(ctx context.Context, uim uimFileReader) (string, error) {
 	var errSMSP error
 	for _, path := range smscCandidatePaths {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		smsc, err := readSMSCFromEFSMSPWithUIMRead(ctx, uim, path)
 		if strings.TrimSpace(smsc) != "" {
 			return strings.TrimSpace(smsc), nil
@@ -204,6 +238,9 @@ func getSMSCFromUIMFiles(ctx context.Context, uim uimFileReader) (string, error)
 
 	var errPSI error
 	for _, path := range smscCandidatePaths {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		smsc, err := readSMSCFromEFPSISMSCWithUIMRead(ctx, uim, path)
 		if strings.TrimSpace(smsc) != "" {
 			return strings.TrimSpace(smsc), nil
@@ -244,6 +281,9 @@ func readSMSCFromEFSMSPWithUIMRead(ctx context.Context, uim uimFileReader, path 
 
 	var lastErr error
 	for record := 1; record <= maxRecords; record++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		rec, err := uim.ReadRecordWithSession(
 			ctx,
 			qmi.UIMSessionTypePrimaryGWProvisioning,
@@ -630,7 +670,7 @@ func allBytes(buf []byte, value byte) bool {
 
 // CachedSMSC returns the last known good SMSC address, or empty string if unknown.
 func (m *Manager) CachedSMSC() string {
-m.mu.RLock()
-defer m.mu.RUnlock()
-return m.wmsSMSCValue
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.wmsSMSCValue
 }

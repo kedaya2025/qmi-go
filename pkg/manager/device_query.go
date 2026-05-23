@@ -369,6 +369,13 @@ func (m *Manager) UIMGetFileAttributesWithSession(ctx context.Context, sessionTy
 	})
 }
 
+// UIMReadTransparentWithSession 使用指定 session 读取 transparent 型 EF 文件
+func (m *Manager) UIMReadTransparentWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8) ([]byte, error) {
+	return withUIMRecoveryValue(m, "UIMReadTransparentWithSession", func(uim *qmi.UIMService) ([]byte, error) {
+		return uim.ReadTransparentWithSession(ctx, sessionType, fileID, path)
+	})
+}
+
 // UIMRegisterEvents 注册 UIM 事件掩码
 func (m *Manager) UIMRegisterEvents(ctx context.Context, mask uint32) (uint32, error) {
 	return withUIMRecoveryValue(m, "UIMRegisterEvents", func(uim *qmi.UIMService) (uint32, error) {

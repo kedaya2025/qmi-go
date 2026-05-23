@@ -86,6 +86,7 @@ type Config struct {
 	RetryPolicy     RetryPolicy
 	HealthPolicy    HealthPolicy
 	EventPolicy     EventPolicy
+	RecoveryPolicy  RecoveryPolicy
 	ClientOptions   qmi.ClientOptions
 }
 
@@ -114,16 +115,25 @@ type EventPolicy struct {
 	CallbackQueueSize int
 }
 
+type RecoveryPolicy struct {
+	DisableServiceTimeoutRecovery bool
+	ServiceTimeoutThreshold       int
+	ServiceTimeoutWindow          time.Duration
+	ServiceRecoverCooldown        time.Duration
+}
+
 type ManagerStats struct {
-	StatusChecks       uint64
-	DebouncedChecks    uint64
-	ReconnectScheduled uint64
-	StaleTimerIgnored  uint64
-	ResetEvents        uint64
-	ResetCoalesced     uint64
-	RecoverAttempts    uint64
-	RecoverSuccess     uint64
-	RecoverBackoffMs   uint64
+	StatusChecks             uint64
+	DebouncedChecks          uint64
+	ReconnectScheduled       uint64
+	StaleTimerIgnored        uint64
+	ResetEvents              uint64
+	ResetCoalesced           uint64
+	RecoverAttempts          uint64
+	RecoverSuccess           uint64
+	RecoverBackoffMs         uint64
+	ServiceTimeouts          uint64
+	ServiceTimeoutRecoveries uint64
 }
 
 // ============================================================================
@@ -205,6 +215,8 @@ type Manager struct {
 	uimLastRecoverSignal    time.Time
 	uimRecoverCooldown      time.Duration
 	wmsReplayInProgress     bool
+	serviceTimeoutMu        sync.Mutex
+	serviceTimeoutFailures  map[serviceTimeoutKey]serviceTimeoutWindow
 
 	// SMS recovery state / 短信恢复状态
 	lastKnownGoodRoutes        *qmi.WMSRouteConfig
@@ -266,15 +278,17 @@ type Manager struct {
 	getICCIDStrictHook                func(ctx context.Context) (string, error)
 	getIMSIStrictHook                 func(ctx context.Context) (string, error)
 
-	statusChecks       atomic.Uint64
-	debouncedChecks    atomic.Uint64
-	reconnectScheduled atomic.Uint64
-	staleTimerIgnored  atomic.Uint64
-	resetEvents        atomic.Uint64
-	resetCoalesced     atomic.Uint64
-	recoverAttempts    atomic.Uint64
-	recoverSuccess     atomic.Uint64
-	recoverBackoffMs   atomic.Uint64
+	statusChecks             atomic.Uint64
+	debouncedChecks          atomic.Uint64
+	reconnectScheduled       atomic.Uint64
+	staleTimerIgnored        atomic.Uint64
+	resetEvents              atomic.Uint64
+	resetCoalesced           atomic.Uint64
+	recoverAttempts          atomic.Uint64
+	recoverSuccess           atomic.Uint64
+	recoverBackoffMs         atomic.Uint64
+	serviceTimeouts          atomic.Uint64
+	serviceTimeoutRecoveries atomic.Uint64
 
 	// 设备状态快照（由 NAS Indication 事件驱动，供上层零 IPC 读取）
 	snapshot DeviceSnapshot
@@ -329,6 +343,8 @@ var defaultEventPolicy = EventPolicy{
 }
 
 const defaultUIMRecoverCooldown = 10 * time.Second
+const defaultServiceTimeoutThreshold = 3
+const defaultServiceTimeoutWindow = 5 * time.Minute
 const defaultModemResetDedupWindow = 1 * time.Second
 const defaultModemResetQuietWindow = 3 * time.Second
 const defaultPostRegRefreshDelay = 800 * time.Millisecond
@@ -399,6 +415,15 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.EventPolicy.CallbackQueueSize <= 0 {
 		cfg.EventPolicy.CallbackQueueSize = defaultEventPolicy.CallbackQueueSize
 	}
+	if cfg.RecoveryPolicy.ServiceTimeoutThreshold <= 0 {
+		cfg.RecoveryPolicy.ServiceTimeoutThreshold = defaultServiceTimeoutThreshold
+	}
+	if cfg.RecoveryPolicy.ServiceTimeoutWindow <= 0 {
+		cfg.RecoveryPolicy.ServiceTimeoutWindow = defaultServiceTimeoutWindow
+	}
+	if cfg.RecoveryPolicy.ServiceRecoverCooldown <= 0 {
+		cfg.RecoveryPolicy.ServiceRecoverCooldown = defaultUIMRecoverCooldown
+	}
 	defaultClientOpts := qmi.DefaultClientOptions()
 	if cfg.ClientOptions.ReadDeadline <= 0 {
 		cfg.ClientOptions.ReadDeadline = defaultClientOpts.ReadDeadline
@@ -463,7 +488,7 @@ func New(cfg Config, logger Logger) *Manager {
 		scheduledTimers:       make(map[*time.Timer]struct{}),
 		modemResetDedupWindow: defaultModemResetDedupWindow,
 		modemResetQuietWindow: defaultModemResetQuietWindow,
-		uimRecoverCooldown:    defaultUIMRecoverCooldown,
+		uimRecoverCooldown:    cfg.RecoveryPolicy.ServiceRecoverCooldown,
 	}
 }
 
@@ -724,15 +749,17 @@ func (m *Manager) Stats() ManagerStats {
 		return ManagerStats{}
 	}
 	return ManagerStats{
-		StatusChecks:       m.statusChecks.Load(),
-		DebouncedChecks:    m.debouncedChecks.Load(),
-		ReconnectScheduled: m.reconnectScheduled.Load(),
-		StaleTimerIgnored:  m.staleTimerIgnored.Load(),
-		ResetEvents:        m.resetEvents.Load(),
-		ResetCoalesced:     m.resetCoalesced.Load(),
-		RecoverAttempts:    m.recoverAttempts.Load(),
-		RecoverSuccess:     m.recoverSuccess.Load(),
-		RecoverBackoffMs:   m.recoverBackoffMs.Load(),
+		StatusChecks:             m.statusChecks.Load(),
+		DebouncedChecks:          m.debouncedChecks.Load(),
+		ReconnectScheduled:       m.reconnectScheduled.Load(),
+		StaleTimerIgnored:        m.staleTimerIgnored.Load(),
+		ResetEvents:              m.resetEvents.Load(),
+		ResetCoalesced:           m.resetCoalesced.Load(),
+		RecoverAttempts:          m.recoverAttempts.Load(),
+		RecoverSuccess:           m.recoverSuccess.Load(),
+		RecoverBackoffMs:         m.recoverBackoffMs.Load(),
+		ServiceTimeouts:          m.serviceTimeouts.Load(),
+		ServiceTimeoutRecoveries: m.serviceTimeoutRecoveries.Load(),
 	}
 }
 

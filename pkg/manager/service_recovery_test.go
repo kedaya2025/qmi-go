@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -46,6 +47,126 @@ func ctlGetClientIDFailure() error {
 		MessageID: qmi.CTLGetClientID,
 		Result:    0x0001,
 		ErrorCode: qmi.QMIErrClientIDsExhausted,
+	}
+}
+
+func TestServiceTimeoutBelowThresholdDoesNotRecover(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.cfg = normalizeConfig(Config{
+		RecoveryPolicy: RecoveryPolicy{
+			ServiceTimeoutThreshold: 3,
+			ServiceTimeoutWindow:    time.Minute,
+		},
+	})
+	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
+	rebindCalls := 0
+	m.rebindDMSServiceHook = func(reason string) (*qmi.DMSService, error) {
+		rebindCalls++
+		return &qmi.DMSService{}, nil
+	}
+
+	for i := 0; i < 2; i++ {
+		err := m.withDMSRecovery("DMS.TimeoutOp", func(dms *qmi.DMSService) error {
+			return context.DeadlineExceeded
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("attempt %d error=%v, want context deadline exceeded", i+1, err)
+		}
+	}
+	if rebindCalls != 0 {
+		t.Fatalf("expected no rebind below timeout threshold, got %d", rebindCalls)
+	}
+	select {
+	case evt := <-m.eventCh:
+		t.Fatalf("expected no core recovery event below timeout threshold, got %v", evt)
+	default:
+	}
+	stats := m.Stats()
+	if stats.ServiceTimeouts != 2 {
+		t.Fatalf("expected service_timeouts=2, got %d", stats.ServiceTimeouts)
+	}
+	if stats.ServiceTimeoutRecoveries != 0 {
+		t.Fatalf("expected service_timeout_recoveries=0, got %d", stats.ServiceTimeoutRecoveries)
+	}
+}
+
+func TestServiceTimeoutThresholdTriggersCoreRecovery(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.cfg = normalizeConfig(Config{
+		RecoveryPolicy: RecoveryPolicy{
+			ServiceTimeoutThreshold: 3,
+			ServiceTimeoutWindow:    time.Minute,
+			ServiceRecoverCooldown:  10 * time.Millisecond,
+		},
+	})
+	m.coreReady = true
+	m.state = StateDisconnected
+	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
+	rebindCalls := 0
+	m.rebindDMSServiceHook = func(reason string) (*qmi.DMSService, error) {
+		rebindCalls++
+		if reason != "recover:DMS.TimeoutOp" {
+			t.Fatalf("unexpected rebind reason: %q", reason)
+		}
+		return &qmi.DMSService{}, nil
+	}
+
+	for i := 0; i < 3; i++ {
+		err := m.withDMSRecovery("DMS.TimeoutOp", func(dms *qmi.DMSService) error {
+			return context.DeadlineExceeded
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("attempt %d error=%v, want context deadline exceeded", i+1, err)
+		}
+	}
+	if rebindCalls != 1 {
+		t.Fatalf("expected one rebind at timeout threshold, got %d", rebindCalls)
+	}
+	if evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second); evt != eventModemReset {
+		t.Fatalf("expected eventModemReset, got %v", evt)
+	}
+	stats := m.Stats()
+	if stats.ServiceTimeouts != 4 {
+		t.Fatalf("expected service_timeouts=4 including retry, got %d", stats.ServiceTimeouts)
+	}
+	if stats.ServiceTimeoutRecoveries != 1 {
+		t.Fatalf("expected service_timeout_recoveries=1, got %d", stats.ServiceTimeoutRecoveries)
+	}
+}
+
+func TestContextCanceledDoesNotTriggerServiceRecovery(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.cfg = normalizeConfig(Config{
+		RecoveryPolicy: RecoveryPolicy{
+			ServiceTimeoutThreshold: 1,
+			ServiceTimeoutWindow:    time.Minute,
+		},
+	})
+	m.coreReady = true
+	m.state = StateDisconnected
+	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
+	rebindCalls := 0
+	m.rebindDMSServiceHook = func(reason string) (*qmi.DMSService, error) {
+		rebindCalls++
+		return &qmi.DMSService{}, nil
+	}
+
+	err := m.withDMSRecovery("DMS.CanceledOp", func(dms *qmi.DMSService) error {
+		return context.Canceled
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v, want context canceled", err)
+	}
+	if rebindCalls != 0 {
+		t.Fatalf("expected no rebind on context canceled, got %d", rebindCalls)
+	}
+	if stats := m.Stats(); stats.ServiceTimeouts != 0 {
+		t.Fatalf("expected no timeout stats on context canceled, got %d", stats.ServiceTimeouts)
+	}
+	select {
+	case evt := <-m.eventCh:
+		t.Fatalf("expected no core recovery event on context canceled, got %v", evt)
+	default:
 	}
 }
 

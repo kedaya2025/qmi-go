@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -8,6 +9,16 @@ import (
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
+
+type serviceTimeoutKey struct {
+	service string
+	op      string
+}
+
+type serviceTimeoutWindow struct {
+	first time.Time
+	count int
+}
 
 func shouldRecoverServiceError(service string, err error, serviceUnavailableText string) bool {
 	if err == nil {
@@ -39,6 +50,106 @@ func shouldRecoverServiceError(service string, err error, serviceUnavailableText
 	return strings.Contains(lowerErr, strings.ToLower(needle)) ||
 		strings.Contains(lowerErr, "qmi 服务未就绪: "+lowerSvc) ||
 		strings.Contains(lowerErr, "allocate client id request failed")
+}
+
+func isServiceTimeoutError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeoutErr *qmi.TimeoutError
+	return errors.As(err, &timeoutErr)
+}
+
+func (m *Manager) shouldRecoverServiceOperationError(service string, op string, err error, serviceUnavailableText string) bool {
+	if shouldRecoverServiceError(service, err, serviceUnavailableText) {
+		return true
+	}
+	if !isServiceTimeoutError(err) {
+		return false
+	}
+	return m.recordServiceTimeoutFailure(service, op, err)
+}
+
+func (m *Manager) recordServiceTimeoutFailure(service string, op string, err error) bool {
+	if m == nil {
+		return false
+	}
+	m.serviceTimeouts.Add(1)
+	if m.cfg.RecoveryPolicy.DisableServiceTimeoutRecovery {
+		return false
+	}
+
+	threshold := m.cfg.RecoveryPolicy.ServiceTimeoutThreshold
+	if threshold <= 0 {
+		threshold = defaultServiceTimeoutThreshold
+	}
+	window := m.cfg.RecoveryPolicy.ServiceTimeoutWindow
+	if window <= 0 {
+		window = defaultServiceTimeoutWindow
+	}
+	if threshold <= 1 {
+		threshold = 1
+	}
+
+	now := time.Now()
+	key := serviceTimeoutKey{
+		service: strings.ToUpper(strings.TrimSpace(service)),
+		op:      strings.TrimSpace(op),
+	}
+	if key.op == "" {
+		key.op = "*"
+	}
+
+	m.serviceTimeoutMu.Lock()
+	if m.serviceTimeoutFailures == nil {
+		m.serviceTimeoutFailures = make(map[serviceTimeoutKey]serviceTimeoutWindow)
+	}
+	state := m.serviceTimeoutFailures[key]
+	if state.first.IsZero() || now.Sub(state.first) > window {
+		state = serviceTimeoutWindow{first: now}
+	}
+	state.count++
+	m.serviceTimeoutFailures[key] = state
+	reached := state.count >= threshold
+	firstReached := state.count == threshold
+	m.serviceTimeoutMu.Unlock()
+
+	entry := m.log.
+		WithField("service_name", key.service).
+		WithField("op", key.op).
+		WithField("timeout_count", state.count).
+		WithField("timeout_threshold", threshold).
+		WithField("timeout_window_ms", window.Milliseconds())
+	if reached {
+		if firstReached {
+			m.serviceTimeoutRecoveries.Add(1)
+			entry.WithError(err).Warn("Service operation timeout threshold reached; enabling recovery")
+		} else {
+			entry.WithError(err).Debug("Service operation timeout remains above recovery threshold")
+		}
+		return true
+	}
+	entry.WithError(err).Debug("Service operation timeout observed below recovery threshold")
+	return false
+}
+
+func (m *Manager) noteServiceOperationSuccess(service string, op string) {
+	if m == nil {
+		return
+	}
+	key := serviceTimeoutKey{
+		service: strings.ToUpper(strings.TrimSpace(service)),
+		op:      strings.TrimSpace(op),
+	}
+	if key.op == "" {
+		key.op = "*"
+	}
+	m.serviceTimeoutMu.Lock()
+	delete(m.serviceTimeoutFailures, key)
+	m.serviceTimeoutMu.Unlock()
 }
 
 func (m *Manager) logServiceRecovery(service string, op string, phase string, err error, message string) {
@@ -123,7 +234,7 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 
 	dms, err := m.ensureDMSService()
 	if err != nil {
-		if m.shouldRecoverDMSError(err) {
+		if m.shouldRecoverDMSError(op, err) {
 			m.triggerCoreRecoveryFromService("DMS", op, "initial", err)
 		}
 		return zero, err
@@ -131,9 +242,10 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 
 	result, err := fn(dms)
 	if err == nil {
+		m.noteServiceOperationSuccess("DMS", op)
 		return result, nil
 	}
-	if !m.shouldRecoverDMSError(err) {
+	if !m.shouldRecoverDMSError(op, err) {
 		return result, err
 	}
 
@@ -150,10 +262,11 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 
 	retryResult, retryErr := fn(dms)
 	if retryErr == nil {
+		m.noteServiceOperationSuccess("DMS", op)
 		m.log.WithField("service_name", "DMS").WithField("op", op).WithField("phase", "retry").Info("DMS operation recovered after rebind")
 		return retryResult, nil
 	}
-	if m.shouldRecoverDMSError(retryErr) {
+	if m.shouldRecoverDMSError(op, retryErr) {
 		m.logServiceRecovery("DMS", op, "retry", retryErr, "DMS operation still failing after rebind")
 		m.triggerCoreRecoveryFromService("DMS", op, "retry", retryErr)
 	}
@@ -248,8 +361,8 @@ func (m *Manager) rebindDMSService(reason string) (*qmi.DMSService, error) {
 	return allocated, nil
 }
 
-func (m *Manager) shouldRecoverDMSError(err error) bool {
-	return shouldRecoverServiceError("DMS", err, "dms service not available")
+func (m *Manager) shouldRecoverDMSError(op string, err error) bool {
+	return m.shouldRecoverServiceOperationError("DMS", op, err, "dms service not available")
 }
 
 func (m *Manager) withNASRecovery(op string, fn func(nas *qmi.NASService) error) error {
@@ -264,7 +377,7 @@ func withNASRecoveryValue[T any](m *Manager, op string, fn func(nas *qmi.NASServ
 
 	nas, err := m.ensureNASService()
 	if err != nil {
-		if m.shouldRecoverNASError(err) {
+		if m.shouldRecoverNASError(op, err) {
 			m.triggerCoreRecoveryFromService("NAS", op, "initial", err)
 		}
 		return zero, err
@@ -272,9 +385,10 @@ func withNASRecoveryValue[T any](m *Manager, op string, fn func(nas *qmi.NASServ
 
 	result, err := fn(nas)
 	if err == nil {
+		m.noteServiceOperationSuccess("NAS", op)
 		return result, nil
 	}
-	if !m.shouldRecoverNASError(err) {
+	if !m.shouldRecoverNASError(op, err) {
 		return result, err
 	}
 
@@ -291,10 +405,11 @@ func withNASRecoveryValue[T any](m *Manager, op string, fn func(nas *qmi.NASServ
 
 	retryResult, retryErr := fn(nas)
 	if retryErr == nil {
+		m.noteServiceOperationSuccess("NAS", op)
 		m.log.WithField("service_name", "NAS").WithField("op", op).WithField("phase", "retry").Info("NAS operation recovered after rebind")
 		return retryResult, nil
 	}
-	if m.shouldRecoverNASError(retryErr) {
+	if m.shouldRecoverNASError(op, retryErr) {
 		m.logServiceRecovery("NAS", op, "retry", retryErr, "NAS operation still failing after rebind")
 		m.triggerCoreRecoveryFromService("NAS", op, "retry", retryErr)
 	}
@@ -389,8 +504,8 @@ func (m *Manager) rebindNASService(reason string) (*qmi.NASService, error) {
 	return allocated, nil
 }
 
-func (m *Manager) shouldRecoverNASError(err error) bool {
-	return shouldRecoverServiceError("NAS", err, "nas service not available")
+func (m *Manager) shouldRecoverNASError(op string, err error) bool {
+	return m.shouldRecoverServiceOperationError("NAS", op, err, "nas service not available")
 }
 
 func (m *Manager) withWMSRecovery(op string, fn func(wms *qmi.WMSService) error) error {
@@ -405,7 +520,7 @@ func withWMSRecoveryValue[T any](m *Manager, op string, fn func(wms *qmi.WMSServ
 
 	wms, err := m.ensureWMSService()
 	if err != nil {
-		if m.shouldRecoverWMSError(err) {
+		if m.shouldRecoverWMSError(op, err) {
 			m.triggerCoreRecoveryFromService("WMS", op, "initial", err)
 		}
 		return zero, err
@@ -413,9 +528,10 @@ func withWMSRecoveryValue[T any](m *Manager, op string, fn func(wms *qmi.WMSServ
 
 	result, err := fn(wms)
 	if err == nil {
+		m.noteServiceOperationSuccess("WMS", op)
 		return result, nil
 	}
-	if !m.shouldRecoverWMSError(err) {
+	if !m.shouldRecoverWMSError(op, err) {
 		return result, err
 	}
 
@@ -432,10 +548,11 @@ func withWMSRecoveryValue[T any](m *Manager, op string, fn func(wms *qmi.WMSServ
 
 	retryResult, retryErr := fn(wms)
 	if retryErr == nil {
+		m.noteServiceOperationSuccess("WMS", op)
 		m.log.WithField("service_name", "WMS").WithField("op", op).WithField("phase", "retry").Info("WMS operation recovered after rebind")
 		return retryResult, nil
 	}
-	if m.shouldRecoverWMSError(retryErr) {
+	if m.shouldRecoverWMSError(op, retryErr) {
 		m.logServiceRecovery("WMS", op, "retry", retryErr, "WMS operation still failing after rebind")
 		m.triggerCoreRecoveryFromService("WMS", op, "retry", retryErr)
 	}
@@ -537,8 +654,8 @@ func (m *Manager) rebindWMSService(reason string) (*qmi.WMSService, error) {
 	return allocated, nil
 }
 
-func (m *Manager) shouldRecoverWMSError(err error) bool {
-	return shouldRecoverServiceError("WMS", err, "wms service not available")
+func (m *Manager) shouldRecoverWMSError(op string, err error) bool {
+	return m.shouldRecoverServiceOperationError("WMS", op, err, "wms service not available")
 }
 
 func (m *Manager) withVOICERecovery(op string, fn func(voice *qmi.VOICEService) error) error {
@@ -553,7 +670,7 @@ func withVOICERecoveryValue[T any](m *Manager, op string, fn func(voice *qmi.VOI
 
 	voice, err := m.ensureVOICEService()
 	if err != nil {
-		if m.shouldRecoverVOICEError(err) {
+		if m.shouldRecoverVOICEError(op, err) {
 			m.triggerCoreRecoveryFromService("VOICE", op, "initial", err)
 		}
 		return zero, err
@@ -561,9 +678,10 @@ func withVOICERecoveryValue[T any](m *Manager, op string, fn func(voice *qmi.VOI
 
 	result, err := fn(voice)
 	if err == nil {
+		m.noteServiceOperationSuccess("VOICE", op)
 		return result, nil
 	}
-	if !m.shouldRecoverVOICEError(err) {
+	if !m.shouldRecoverVOICEError(op, err) {
 		return result, err
 	}
 
@@ -580,10 +698,11 @@ func withVOICERecoveryValue[T any](m *Manager, op string, fn func(voice *qmi.VOI
 
 	retryResult, retryErr := fn(voice)
 	if retryErr == nil {
+		m.noteServiceOperationSuccess("VOICE", op)
 		m.log.WithField("service_name", "VOICE").WithField("op", op).WithField("phase", "retry").Info("VOICE operation recovered after rebind")
 		return retryResult, nil
 	}
-	if m.shouldRecoverVOICEError(retryErr) {
+	if m.shouldRecoverVOICEError(op, retryErr) {
 		m.logServiceRecovery("VOICE", op, "retry", retryErr, "VOICE operation still failing after rebind")
 		m.triggerCoreRecoveryFromService("VOICE", op, "retry", retryErr)
 	}
@@ -678,6 +797,6 @@ func (m *Manager) rebindVOICEService(reason string) (*qmi.VOICEService, error) {
 	return allocated, nil
 }
 
-func (m *Manager) shouldRecoverVOICEError(err error) bool {
-	return shouldRecoverServiceError("VOICE", err, "voice service not available")
+func (m *Manager) shouldRecoverVOICEError(op string, err error) bool {
+	return m.shouldRecoverServiceOperationError("VOICE", op, err, "voice service not available")
 }

@@ -256,3 +256,51 @@ func TestManagerGetSMSCServiceNotReady(t *testing.T) {
 		t.Fatalf("unexpected error type: %T", err)
 	}
 }
+
+func TestManagerGetSMSCUsesManagerAPDUTransport(t *testing.T) {
+	record := make([]byte, 0x2A)
+	for i := range record {
+		record[i] = 0xFF
+	}
+	copy(record[13:], encodeAddress("+447870002308"))
+	fcp := []byte{
+		0x62, 0x1E,
+		0x82, 0x05, 0x42, 0x21, 0x00, 0x2A, 0x01,
+		0x83, 0x02, 0x6F, 0x42,
+		0xA5, 0x03, 0x80, 0x01, 0x61,
+		0x8A, 0x01, 0x05,
+		0x8B, 0x03, 0x6F, 0x06, 0x05,
+		0x80, 0x02, 0x00, 0x7E,
+		0x88, 0x00,
+	}
+	script := &apduScript{
+		responses: map[string][][]byte{
+			"00A40004026F42": {append(append([]byte{}, fcp...), 0x90, 0x00)},
+			"00B201042A":     {append(append([]byte{}, record...), 0x90, 0x00)},
+		},
+	}
+
+	m := newRecoveryTestManager()
+	sendCalls := 0
+	m.sendAPDUHook = func(ctx context.Context, slot uint8, channel uint8, command []byte) ([]byte, error) {
+		sendCalls++
+		if slot != smscAPDUSlot {
+			t.Fatalf("slot=%d, want %d", slot, smscAPDUSlot)
+		}
+		if channel != 0 {
+			t.Fatalf("channel=%d, want basic channel", channel)
+		}
+		return script.send(command)
+	}
+
+	got, err := m.GetSMSC(context.Background())
+	if err != nil {
+		t.Fatalf("GetSMSC() error=%v", err)
+	}
+	if got != "+447870002308" {
+		t.Fatalf("GetSMSC()=%q want=%q", got, "+447870002308")
+	}
+	if sendCalls == 0 {
+		t.Fatal("expected GetSMSC to use manager APDU transport")
+	}
+}
