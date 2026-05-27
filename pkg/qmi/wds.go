@@ -72,6 +72,13 @@ type WDSService struct {
 	TechnologyPreference uint16 // Bitmask: 0x8000=3GPP, 0x4000=3GPP2
 }
 
+const AnyPacketDataHandle uint32 = ^uint32(0)
+
+type StopNetworkInterfaceOptions struct {
+	Handle             uint32
+	DisableAutoconnect bool
+}
+
 type OutOfCallError struct {
 	Operation string
 }
@@ -368,8 +375,11 @@ func (w *WDSService) StartNetworkInterface(ctx context.Context, apn string, user
 
 // StopNetworkInterface terminates a data call / StopNetworkInterface终止数据呼叫
 func (w *WDSService) StopNetworkInterface(ctx context.Context, handle uint32) error {
-	tlvs := []TLV{NewTLVUint32(0x01, handle)}
+	return w.StopNetworkInterfaceWithOptions(ctx, StopNetworkInterfaceOptions{Handle: handle})
+}
 
+func (w *WDSService) StopNetworkInterfaceWithOptions(ctx context.Context, opts StopNetworkInterfaceOptions) error {
+	tlvs := buildStopNetworkInterfaceTLVs(opts)
 	resp, err := w.client.SendRequest(ctx, ServiceWDS, w.clientID, WDSStopNetworkInterface, tlvs)
 	if err != nil {
 		return err
@@ -379,6 +389,21 @@ func (w *WDSService) StopNetworkInterface(ctx context.Context, handle uint32) er
 		return fmt.Errorf("stop network failed: %w", err)
 	}
 	return nil
+}
+
+func (w *WDSService) StopAnyNetworkInterface(ctx context.Context, disableAutoconnect bool) error {
+	return w.StopNetworkInterfaceWithOptions(ctx, StopNetworkInterfaceOptions{
+		Handle:             AnyPacketDataHandle,
+		DisableAutoconnect: disableAutoconnect,
+	})
+}
+
+func buildStopNetworkInterfaceTLVs(opts StopNetworkInterfaceOptions) []TLV {
+	tlvs := []TLV{NewTLVUint32(0x01, opts.Handle)}
+	if opts.DisableAutoconnect {
+		tlvs = append(tlvs, NewTLVUint8(0x10, 1))
+	}
+	return tlvs
 }
 
 // ConnectionStatus represents the current connection state / ConnectionStatus代表当前连接状态

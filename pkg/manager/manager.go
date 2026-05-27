@@ -242,6 +242,9 @@ type Manager struct {
 	querySignalStrength               func(ctx context.Context) (*qmi.SignalStrength, error)
 	queryServingSystem                func(ctx context.Context) (*qmi.ServingSystem, error)
 	queryPacketServiceState           func(ctx context.Context) (qmi.ConnectionStatus, error)
+	queryExistingPacketServiceState   func(ctx context.Context, wds *qmi.WDSService) (qmi.ConnectionStatus, error)
+	stopExistingDataCall              func(ctx context.Context, wds *qmi.WDSService) error
+	closeWDSService                   func(wds *qmi.WDSService) error
 	registerWMSEventReport            func(ctx context.Context) error
 	registerWMSIndications            func(ctx context.Context, reportTransportNetworkRegistration bool) error
 	registerUIMIndications            func(ctx context.Context) (uint32, error)
@@ -646,6 +649,69 @@ func (m *Manager) Disconnect() error {
 	return nil
 }
 
+func (m *Manager) ResetExistingDataConnection(ctx context.Context) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	coreReady := m.coreReady
+	wds := m.wds
+
+	if !coreReady || m.client == nil {
+		return false, ErrServiceNotReady("qmi-core")
+	}
+
+	temporaryWDS := false
+	if wds == nil {
+		var err error
+		wds, err = m.createWDSService(ctx)
+		if err != nil {
+			return false, fmt.Errorf("allocate WDS client for existing data cleanup: %w", err)
+		}
+		temporaryWDS = true
+	}
+	if temporaryWDS {
+		defer func() {
+			if err := m.closeTemporaryWDSService(wds); err != nil {
+				m.log.WithError(err).Warn("Failed to release temporary WDS client after existing data cleanup")
+			}
+		}()
+	}
+
+	status, err := m.queryExistingPacketServiceStatus(ctx, wds)
+	if err != nil {
+		return false, fmt.Errorf("query existing packet service status: %w", err)
+	}
+	if !packetServiceStatusHasDataCall(status) {
+		return false, nil
+	}
+
+	if err := m.stopExistingPacketDataCall(ctx, wds); err != nil {
+		return false, fmt.Errorf("stop existing qmi data call: %w", err)
+	}
+
+	status, err = m.queryExistingPacketServiceStatus(ctx, wds)
+	if err != nil {
+		return false, fmt.Errorf("verify existing packet service status after stop: %w", err)
+	}
+	if packetServiceStatusHasDataCall(status) {
+		return false, fmt.Errorf("existing qmi data call still connected after stop: %s", status.String())
+	}
+
+	m.handleV4 = 0
+	m.handleV6 = 0
+	m.settings = nil
+	m.desiredConnection = false
+	if m.state == StateConnected || m.state == StateConnecting {
+		m.log.Infof("State: %s -> %s", m.state, StateDisconnected)
+		m.state = StateDisconnected
+	}
+	return true, nil
+}
+
 // State returns the current connection state / State 返回当前的连接状态
 func (m *Manager) State() State {
 	m.mu.RLock()
@@ -871,6 +937,59 @@ func (m *Manager) getPacketServiceState(ctx context.Context) (qmi.ConnectionStat
 		return qmi.StatusUnknown, fmt.Errorf("wds service not available")
 	}
 	return m.wds.GetPacketServiceStatus(ctx)
+}
+
+func packetServiceStatusHasDataCall(status qmi.ConnectionStatus) bool {
+	switch status {
+	case qmi.StatusConnected, qmi.StatusSuspended, qmi.StatusAuthenticating:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) queryExistingPacketServiceStatus(ctx context.Context, wds *qmi.WDSService) (qmi.ConnectionStatus, error) {
+	if m.queryExistingPacketServiceState != nil {
+		return m.queryExistingPacketServiceState(ctx, wds)
+	}
+	if wds == nil {
+		return qmi.StatusUnknown, fmt.Errorf("wds service not available")
+	}
+	return wds.GetPacketServiceStatus(ctx)
+}
+
+func (m *Manager) stopExistingPacketDataCall(ctx context.Context, wds *qmi.WDSService) error {
+	if m.stopExistingDataCall != nil {
+		return m.stopExistingDataCall(ctx, wds)
+	}
+	if wds == nil {
+		return fmt.Errorf("wds service not available")
+	}
+	if err := wds.StopAnyNetworkInterface(ctx, true); err != nil {
+		if isExistingDataStopNoopError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func isExistingDataStopNoopError(err error) bool {
+	var qmiErr *qmi.QMIError
+	if !errors.As(err, &qmiErr) || qmiErr == nil {
+		return false
+	}
+	return qmiErr.ErrorCode == qmi.QMIErrOutOfCall || qmiErr.ErrorCode == qmi.QMIErrNoEffect
+}
+
+func (m *Manager) closeTemporaryWDSService(wds *qmi.WDSService) error {
+	if m.closeWDSService != nil {
+		return m.closeWDSService(wds)
+	}
+	if wds == nil {
+		return nil
+	}
+	return wds.Close()
 }
 
 func (m *Manager) opContext(timeout time.Duration) (context.Context, context.CancelFunc) {
