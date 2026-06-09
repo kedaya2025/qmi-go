@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -13,7 +14,7 @@ import (
 func TestDoRecoverFromModemResetResetsSnapshotImmediately(t *testing.T) {
 	m := newRecoveryTestManager()
 	m.snapshot.UpdateIdentities(DeviceIdentities{ICCID: "old-iccid", IMSI: "old-imsi"})
-	m.openClientAndAllocateServicesHook = func() error { return nil }
+	m.openClientAndAllocateServicesHook = func(context.Context) error { return nil }
 	m.checkSIMHook = func() error { return nil }
 	m.modemResetQuietWindow = 5 * time.Millisecond
 	m.getICCIDStrictHook = func(ctx context.Context) (string, error) { return "new-iccid", nil }
@@ -34,7 +35,7 @@ func TestDoRecoverFromModemResetResetsSnapshotImmediately(t *testing.T) {
 func TestDoRecoverFromModemResetIdentityGateBlocksCoreReady(t *testing.T) {
 	m := newRecoveryTestManager()
 	m.cfg.Timeouts.SIMCheck = 80 * time.Millisecond
-	m.openClientAndAllocateServicesHook = func() error { return nil }
+	m.openClientAndAllocateServicesHook = func(context.Context) error { return nil }
 	m.checkSIMHook = func() error { return nil }
 	m.modemResetQuietWindow = 5 * time.Millisecond
 	m.getICCIDStrictHook = func(ctx context.Context) (string, error) {
@@ -50,6 +51,9 @@ func TestDoRecoverFromModemResetIdentityGateBlocksCoreReady(t *testing.T) {
 	if m.IsCoreReady() {
 		t.Fatal("coreReady should stay false while identity gate is unsatisfied")
 	}
+	if !m.IsControlReady() {
+		t.Fatal("controlReady should be true after services are reinitialized")
+	}
 
 	m.mu.RLock()
 	stage := m.coreReadyStage
@@ -59,10 +63,78 @@ func TestDoRecoverFromModemResetIdentityGateBlocksCoreReady(t *testing.T) {
 	}
 }
 
+func TestWaitControlReadyDoesNotRequireIdentity(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.cfg.Timeouts.SIMCheck = 50 * time.Millisecond
+	m.openClientAndAllocateServicesHook = func(context.Context) error { return nil }
+	m.checkSIMHook = func() error { return nil }
+	m.modemResetQuietWindow = 5 * time.Millisecond
+	m.getICCIDStrictHook = func(ctx context.Context) (string, error) {
+		return "", fmt.Errorf("uim not ready")
+	}
+	m.getIMSIStrictHook = func(ctx context.Context) (string, error) {
+		return "", fmt.Errorf("uim not ready")
+	}
+
+	if ok := m.doRecoverFromModemReset(); ok {
+		t.Fatal("expected recover to fail while identity is unreadable")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := m.WaitControlReady(ctx); err != nil {
+		t.Fatalf("WaitControlReady() error = %v, want nil", err)
+	}
+}
+
+func TestStartCoreContextReturnsWhenOpenBlocksPastDeadline(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.openClientAndAllocateServicesHook = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := m.StartCoreContext(ctx)
+	if err == nil {
+		t.Fatal("StartCoreContext() error = nil, want deadline")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StartCoreContext() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("StartCoreContext() elapsed = %v, want bounded by caller deadline", elapsed)
+	}
+	if m.state != StateDisconnected {
+		t.Fatalf("state = %s, want disconnected after deadline", m.state)
+	}
+}
+
+func TestWaitIdentityReadyRequiresReadableIdentity(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.mu.Lock()
+	m.markControlReadyLocked("recover_control_ready")
+	m.markCoreNotReadyLocked("recover_wait_identity", fmt.Errorf("uim not ready"))
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := m.WaitIdentityReady(ctx)
+	if err == nil {
+		t.Fatal("WaitIdentityReady() error = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "recover_wait_identity") {
+		t.Fatalf("WaitIdentityReady() error = %v, want identity stage", err)
+	}
+}
+
 func TestDoRecoverFromModemResetPendingStormBlocksCoreReady(t *testing.T) {
 	m := newRecoveryTestManager()
 	m.cfg.Timeouts.SIMCheck = 100 * time.Millisecond
-	m.openClientAndAllocateServicesHook = func() error { return nil }
+	m.openClientAndAllocateServicesHook = func(context.Context) error { return nil }
 	m.checkSIMHook = func() error { return nil }
 	m.modemResetQuietWindow = 100 * time.Millisecond
 	m.modemResetPending = true

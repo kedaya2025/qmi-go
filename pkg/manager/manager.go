@@ -167,6 +167,9 @@ type Manager struct {
 	mu                sync.RWMutex
 	state             State
 	settings          *qmi.RuntimeSettings
+	controlReady      bool
+	controlReadyStage string
+	controlReadySince time.Time
 	coreReady         bool
 	coreReadyStage    string
 	coreReadyLastErr  string
@@ -277,7 +280,7 @@ type Manager struct {
 	newVOICEService                   func(ctx context.Context, client *qmi.Client) (*qmi.VOICEService, error)
 	enableRawIPHook                   func(ctx context.Context) error
 	onWMSRebindReplayHook             func(reason string)
-	openClientAndAllocateServicesHook func() error
+	openClientAndAllocateServicesHook func(context.Context) error
 	checkSIMHook                      func() error
 	getICCIDStrictHook                func(ctx context.Context) (string, error)
 	getIMSIStrictHook                 func(ctx context.Context) (string, error)
@@ -498,7 +501,7 @@ func New(cfg Config, logger Logger) *Manager {
 
 // Start initializes and starts the connection manager / Start 初始化并启动连接管理器
 func (m *Manager) Start() error {
-	if err := m.StartCore(); err != nil {
+	if err := m.StartCoreContext(context.Background()); err != nil {
 		return err
 	}
 
@@ -516,6 +519,14 @@ func (m *Manager) Start() error {
 
 // StartCore initializes the QMI core services without starting a data call.
 func (m *Manager) StartCore() error {
+	return m.StartCoreContext(context.Background())
+}
+
+// StartCoreContext initializes the QMI core services without starting a data call.
+func (m *Manager) StartCoreContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	if m.coreReady || m.state != StateDisconnected {
 		m.mu.Unlock()
@@ -527,15 +538,18 @@ func (m *Manager) StartCore() error {
 
 	openErr := error(nil)
 	if m.openClientAndAllocateServicesHook != nil {
-		openErr = m.openClientAndAllocateServicesHook()
+		openErr = m.openClientAndAllocateServicesHook(ctx)
 	} else {
-		openErr = m.openClientAndAllocateServices()
+		openErr = m.openClientAndAllocateServices(ctx)
 	}
 	if openErr != nil {
 		m.cleanup()
 		m.setState(StateDisconnected)
 		return openErr
 	}
+	m.mu.Lock()
+	m.markControlReadyLocked("start_control_ready")
+	m.mu.Unlock()
 
 	// Check SIM status / 检查SIM卡状态
 	if err := m.checkSIM(); err != nil {
@@ -727,8 +741,41 @@ func (m *Manager) IsCoreReady() bool {
 	return m.coreReady
 }
 
+// IsControlReady reports whether QMI client/services are initialized.
+// It can be true while SIM identity is still converging.
+func (m *Manager) IsControlReady() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.controlReady
+}
+
+func (m *Manager) markControlReadyLocked(stage string) {
+	now := time.Now()
+	m.controlReady = true
+	if stage == "" {
+		stage = "control_ready"
+	}
+	m.controlReadyStage = stage
+	m.controlReadySince = now
+}
+
+func (m *Manager) markControlNotReadyLocked(stage string) {
+	now := time.Now()
+	m.controlReady = false
+	if stage != "" {
+		m.controlReadyStage = stage
+	}
+	if m.controlReadyStage == "" {
+		m.controlReadyStage = "control_not_ready"
+	}
+	if m.controlReadySince.IsZero() || stage != "" {
+		m.controlReadySince = now
+	}
+}
+
 func (m *Manager) markCoreReadyLocked(stage string) {
 	now := time.Now()
+	m.markControlReadyLocked(stage)
 	m.coreReady = true
 	if stage == "" {
 		stage = "ready"
@@ -801,6 +848,60 @@ func (m *Manager) WaitCoreReady(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// WaitControlReady blocks until QMI client/services are initialized.
+// It intentionally does not wait for SIM identity readability.
+func (m *Manager) WaitControlReady(ctx context.Context) error {
+	start := time.Now()
+	m.mu.RLock()
+	if m.controlReady {
+		m.mu.RUnlock()
+		return nil
+	}
+	m.mu.RUnlock()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			m.mu.RLock()
+			stage := m.controlReadyStage
+			since := m.controlReadySince
+			m.mu.RUnlock()
+			if stage == "" {
+				stage = "unknown"
+			}
+			stageFor := time.Duration(0)
+			if !since.IsZero() {
+				stageFor = time.Since(since)
+			}
+			return fmt.Errorf(
+				"等待 QMI control 就绪超时 (waited=%s stage=%s stage_for=%s): %w",
+				time.Since(start).Round(time.Millisecond),
+				stage,
+				stageFor.Round(time.Millisecond),
+				ctx.Err(),
+			)
+		case <-ticker.C:
+			m.mu.RLock()
+			ready := m.controlReady
+			m.mu.RUnlock()
+			if ready {
+				return nil
+			}
+		}
+	}
+}
+
+// WaitIdentityReady blocks until the full QMI core convergence gate passes.
+// Today that convergence is represented by coreReady and includes identity readability.
+func (m *Manager) WaitIdentityReady(ctx context.Context) error {
+	if err := m.WaitCoreReady(ctx); err != nil {
+		return fmt.Errorf("等待 QMI identity 收敛就绪失败: %w", err)
+	}
+	return nil
 }
 
 // IsConnected reports whether the data plane is currently connected.
@@ -2532,6 +2633,7 @@ func (m *Manager) cleanup() {
 	m.handleV6 = 0
 	m.settings = nil
 	m.muxIface = ""
+	m.markControlNotReadyLocked("cleanup")
 	m.markCoreNotReadyLocked("cleanup", nil)
 	m.wmsTransportStatus = 0
 	m.wmsTransportKnown = false
@@ -2784,7 +2886,10 @@ func (m *Manager) handleModemResetEvent() {
 	}
 }
 
-func (m *Manager) openClientAndAllocateServices() error {
+func (m *Manager) openClientAndAllocateServices(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if runtime.GOOS == "linux" {
 		rawIPPath := filepath.Join("/sys/class/net", m.cfg.Device.NetInterface, "qmi/raw_ip")
 		if b, err := os.ReadFile(rawIPPath); err == nil && len(b) > 0 {
@@ -2800,7 +2905,10 @@ func (m *Manager) openClientAndAllocateServices() error {
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		initCtx, cancel := m.opContext(m.cfg.Timeouts.Init)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		initCtx, cancel := contextWithMaxTimeout(ctx, m.cfg.Timeouts.Init)
 		client, err := qmi.NewClientWithOptions(initCtx, m.cfg.Device.ControlPath, m.cfg.ClientOptions)
 		if err != nil {
 			cancel()
@@ -2833,7 +2941,18 @@ func (m *Manager) openClientAndAllocateServices() error {
 
 		delay := time.Duration(attempt) * 2 * time.Second
 		m.log.WithError(lastErr).Warnf("QMI init failed, retrying in %v (%d/%d)", delay, attempt, maxAttempts)
-		time.Sleep(delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 
 	return lastErr
@@ -2853,24 +2972,29 @@ func (m *Manager) doRecoverFromModemReset() bool {
 	m.cleanup()
 	m.snapshot.Reset()
 	m.mu.Lock()
+	m.markControlNotReadyLocked("recover_reinit_services")
 	m.markCoreNotReadyLocked("recover_reinit_services", nil)
 	m.mu.Unlock()
 
 	openErr := error(nil)
 	if m.openClientAndAllocateServicesHook != nil {
-		openErr = m.openClientAndAllocateServicesHook()
+		openErr = m.openClientAndAllocateServicesHook(context.Background())
 	} else {
-		openErr = m.openClientAndAllocateServices()
+		openErr = m.openClientAndAllocateServices(context.Background())
 	}
 	if openErr != nil {
 		m.log.WithError(openErr).Warn("Failed to reinitialize QMI after modem reset")
 		m.mu.Lock()
+		m.markControlNotReadyLocked("recover_reinit_services")
 		m.markCoreNotReadyLocked("recover_reinit_services", openErr)
 		m.mu.Unlock()
 		m.setState(StateDisconnected)
 		m.scheduleRecoverRetry("reinit_failed")
 		return false
 	}
+	m.mu.Lock()
+	m.markControlReadyLocked("recover_control_ready")
+	m.mu.Unlock()
 
 	checkSIMErr := error(nil)
 	if m.checkSIMHook != nil {
