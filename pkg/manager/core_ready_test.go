@@ -32,7 +32,7 @@ func TestDoRecoverFromModemResetResetsSnapshotImmediately(t *testing.T) {
 	}
 }
 
-func TestDoRecoverFromModemResetIdentityGateBlocksCoreReady(t *testing.T) {
+func TestDoRecoverFromModemResetIdentityGateDoesNotBlockCoreReady(t *testing.T) {
 	m := newRecoveryTestManager()
 	m.cfg.Timeouts.SIMCheck = 80 * time.Millisecond
 	m.openClientAndAllocateServicesHook = func(context.Context) error { return nil }
@@ -45,11 +45,11 @@ func TestDoRecoverFromModemResetIdentityGateBlocksCoreReady(t *testing.T) {
 		return "", fmt.Errorf("uim not ready")
 	}
 
-	if ok := m.doRecoverFromModemReset(); ok {
-		t.Fatal("expected recover to fail when identities are unreadable")
+	if ok := m.doRecoverFromModemReset(); !ok {
+		t.Fatal("expected recover to succeed even when identities are unreadable")
 	}
-	if m.IsCoreReady() {
-		t.Fatal("coreReady should stay false while identity gate is unsatisfied")
+	if !m.IsCoreReady() {
+		t.Fatal("coreReady should become true once QMI core is reinitialized")
 	}
 	if !m.IsControlReady() {
 		t.Fatal("controlReady should be true after services are reinitialized")
@@ -58,8 +58,8 @@ func TestDoRecoverFromModemResetIdentityGateBlocksCoreReady(t *testing.T) {
 	m.mu.RLock()
 	stage := m.coreReadyStage
 	m.mu.RUnlock()
-	if stage != "recover_wait_identity" {
-		t.Fatalf("expected stage recover_wait_identity, got %q", stage)
+	if stage != "recover_converged" {
+		t.Fatalf("expected stage recover_converged, got %q", stage)
 	}
 }
 
@@ -76,8 +76,8 @@ func TestWaitControlReadyDoesNotRequireIdentity(t *testing.T) {
 		return "", fmt.Errorf("uim not ready")
 	}
 
-	if ok := m.doRecoverFromModemReset(); ok {
-		t.Fatal("expected recover to fail while identity is unreadable")
+	if ok := m.doRecoverFromModemReset(); !ok {
+		t.Fatal("expected recover to succeed while identity convergence continues separately")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -202,7 +202,7 @@ func TestStrictLiveIdentityBypassesSnapshot(t *testing.T) {
 func TestGetIMSIStrictLiveUsesUIMRecoveryFallback(t *testing.T) {
 	wantErr := errors.New("uim fallback invoked")
 	var ensureCalls int
-	m := &Manager{}
+	m := newRecoveryTestManager()
 	m.getIMSIStrictHook = nil
 	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) {
 		ensureCalls++

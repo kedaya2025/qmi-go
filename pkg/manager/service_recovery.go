@@ -153,7 +153,11 @@ func (m *Manager) noteServiceOperationSuccess(service string, op string) {
 }
 
 func (m *Manager) logServiceRecovery(service string, op string, phase string, err error, message string) {
-	entry := m.log.WithField("service_name", service).WithField("op", op).WithField("phase", phase)
+	log := Logger(NewNopLogger())
+	if m != nil && m.log != nil {
+		log = m.log
+	}
+	entry := log.WithField("service_name", service).WithField("op", op).WithField("phase", phase)
 	if qe := qmi.GetQMIError(err); qe != nil {
 		entry = entry.
 			WithField("service", fmt.Sprintf("0x%02x", qe.Service)).
@@ -235,7 +239,7 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 	dms, err := m.ensureDMSService()
 	if err != nil {
 		if m.shouldRecoverDMSError(op, err) {
-			m.triggerCoreRecoveryFromService("DMS", op, "initial", err)
+			m.logServiceRecovery("DMS", op, "initial", err, "DMS ensure failed (core recovery skipped)")
 		}
 		return zero, err
 	}
@@ -255,8 +259,7 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 	dms, rebindErr := m.rebindDMSService("recover:" + op)
 	m.dmsRecoveryMu.Unlock()
 	if rebindErr != nil {
-		m.logServiceRecovery("DMS", op, "rebind", rebindErr, "DMS service rebind failed")
-		m.triggerCoreRecoveryFromService("DMS", op, "rebind", rebindErr)
+		m.logServiceRecovery("DMS", op, "rebind", rebindErr, "DMS service rebind failed (core recovery skipped)")
 		return zero, fmt.Errorf("%s: DMS rebind failed: %w (initial=%v)", op, rebindErr, err)
 	}
 
@@ -267,8 +270,7 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 		return retryResult, nil
 	}
 	if m.shouldRecoverDMSError(op, retryErr) {
-		m.logServiceRecovery("DMS", op, "retry", retryErr, "DMS operation still failing after rebind")
-		m.triggerCoreRecoveryFromService("DMS", op, "retry", retryErr)
+		m.logServiceRecovery("DMS", op, "retry", retryErr, "DMS operation still failing after rebind (core recovery skipped)")
 	}
 	return retryResult, retryErr
 }
@@ -521,7 +523,7 @@ func withWMSRecoveryValue[T any](m *Manager, op string, fn func(wms *qmi.WMSServ
 	wms, err := m.ensureWMSService()
 	if err != nil {
 		if m.shouldRecoverWMSError(op, err) {
-			m.triggerCoreRecoveryFromService("WMS", op, "initial", err)
+			m.logServiceRecovery("WMS", op, "initial", err, "WMS ensure failed (core recovery skipped)")
 		}
 		return zero, err
 	}
@@ -541,8 +543,7 @@ func withWMSRecoveryValue[T any](m *Manager, op string, fn func(wms *qmi.WMSServ
 	wms, rebindErr := m.rebindWMSService("recover:" + op)
 	m.wmsRecoveryMu.Unlock()
 	if rebindErr != nil {
-		m.logServiceRecovery("WMS", op, "rebind", rebindErr, "WMS service rebind failed")
-		m.triggerCoreRecoveryFromService("WMS", op, "rebind", rebindErr)
+		m.logServiceRecovery("WMS", op, "rebind", rebindErr, "WMS service rebind failed (core recovery skipped)")
 		return zero, fmt.Errorf("%s: WMS rebind failed: %w (initial=%v)", op, rebindErr, err)
 	}
 
@@ -553,8 +554,7 @@ func withWMSRecoveryValue[T any](m *Manager, op string, fn func(wms *qmi.WMSServ
 		return retryResult, nil
 	}
 	if m.shouldRecoverWMSError(op, retryErr) {
-		m.logServiceRecovery("WMS", op, "retry", retryErr, "WMS operation still failing after rebind")
-		m.triggerCoreRecoveryFromService("WMS", op, "retry", retryErr)
+		m.logServiceRecovery("WMS", op, "retry", retryErr, "WMS operation still failing after rebind (core recovery skipped)")
 	}
 	return retryResult, retryErr
 }
@@ -671,7 +671,7 @@ func withVOICERecoveryValue[T any](m *Manager, op string, fn func(voice *qmi.VOI
 	voice, err := m.ensureVOICEService()
 	if err != nil {
 		if m.shouldRecoverVOICEError(op, err) {
-			m.triggerCoreRecoveryFromService("VOICE", op, "initial", err)
+			m.logServiceRecovery("VOICE", op, "initial", err, "VOICE ensure failed (core recovery skipped)")
 		}
 		return zero, err
 	}
@@ -691,8 +691,7 @@ func withVOICERecoveryValue[T any](m *Manager, op string, fn func(voice *qmi.VOI
 	voice, rebindErr := m.rebindVOICEService("recover:" + op)
 	m.voiceRecoveryMu.Unlock()
 	if rebindErr != nil {
-		m.logServiceRecovery("VOICE", op, "rebind", rebindErr, "VOICE service rebind failed")
-		m.triggerCoreRecoveryFromService("VOICE", op, "rebind", rebindErr)
+		m.logServiceRecovery("VOICE", op, "rebind", rebindErr, "VOICE service rebind failed (core recovery skipped)")
 		return zero, fmt.Errorf("%s: VOICE rebind failed: %w (initial=%v)", op, rebindErr, err)
 	}
 
@@ -703,8 +702,7 @@ func withVOICERecoveryValue[T any](m *Manager, op string, fn func(voice *qmi.VOI
 		return retryResult, nil
 	}
 	if m.shouldRecoverVOICEError(op, retryErr) {
-		m.logServiceRecovery("VOICE", op, "retry", retryErr, "VOICE operation still failing after rebind")
-		m.triggerCoreRecoveryFromService("VOICE", op, "retry", retryErr)
+		m.logServiceRecovery("VOICE", op, "retry", retryErr, "VOICE operation still failing after rebind (core recovery skipped)")
 	}
 	return retryResult, retryErr
 }

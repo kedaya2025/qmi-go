@@ -251,7 +251,9 @@ type Manager struct {
 	closeWDSService                   func(wds *qmi.WDSService) error
 	registerWMSEventReport            func(ctx context.Context) error
 	registerWMSIndications            func(ctx context.Context, reportTransportNetworkRegistration bool) error
+	registerNASIndications            func(ctx context.Context, cfg qmi.NASIndicationRegistration) error
 	registerUIMIndications            func(ctx context.Context) (uint32, error)
+	registerVOICEIndications          func(ctx context.Context, cfg qmi.VoiceIndicationRegistration) error
 	queryWMSTransportState            func(ctx context.Context) (qmi.WMSTransportNetworkRegistration, error)
 	queryWMSRoutes                    func(ctx context.Context) (*qmi.WMSRouteConfig, error)
 	setWMSRoutes                      func(ctx context.Context, routes []qmi.WMSRoute, transferStatusReportToClient bool) error
@@ -349,11 +351,11 @@ var defaultEventPolicy = EventPolicy{
 	CallbackQueueSize: 128,
 }
 
-const defaultUIMRecoverCooldown = 10 * time.Second
-const defaultServiceTimeoutThreshold = 3
-const defaultServiceTimeoutWindow = 5 * time.Minute
+const defaultUIMRecoverCooldown = 30 * time.Second
+const defaultServiceTimeoutThreshold = 5
+const defaultServiceTimeoutWindow = 10 * time.Minute
 const defaultModemResetDedupWindow = 1 * time.Second
-const defaultModemResetQuietWindow = 3 * time.Second
+const defaultModemResetQuietWindow = 1 * time.Second
 const defaultPostRegRefreshDelay = 800 * time.Millisecond
 const defaultPostRegRefreshTimeout = 4 * time.Second
 const defaultPostRegRefreshCooldown = 2 * time.Second
@@ -1442,6 +1444,15 @@ func (m *Manager) registerWMSIndicationsWithContext(ctx context.Context, reportT
 	})
 }
 
+func (m *Manager) registerNASIndicationsWithContext(ctx context.Context, cfg qmi.NASIndicationRegistration) error {
+	if m.registerNASIndications != nil {
+		return m.registerNASIndications(ctx, cfg)
+	}
+	return m.withNASRecovery("registerNASIndicationsWithContext", func(nas *qmi.NASService) error {
+		return nas.RegisterIndicationsWithConfig(ctx, cfg)
+	})
+}
+
 func (m *Manager) uimIndicationRegistrationMask() uint32 {
 	return qmi.UIMEventRegistrationCardStatus |
 		qmi.UIMEventRegistrationExtendedCardStatus |
@@ -1456,6 +1467,15 @@ func (m *Manager) registerUIMIndicationsWithContext(ctx context.Context, uim *qm
 		return 0, ErrServiceNotReady("UIM")
 	}
 	return uim.RegisterEvents(ctx, m.uimIndicationRegistrationMask())
+}
+
+func (m *Manager) registerVOICEIndicationsWithContext(ctx context.Context, cfg qmi.VoiceIndicationRegistration) error {
+	if m.registerVOICEIndications != nil {
+		return m.registerVOICEIndications(ctx, cfg)
+	}
+	return m.withVOICERecovery("registerVOICEIndicationsWithContext", func(voice *qmi.VOICEService) error {
+		return voice.IndicationRegister(ctx, cfg)
+	})
 }
 
 func (m *Manager) queryWMSTransportStateWithContext(ctx context.Context) (qmi.WMSTransportNetworkRegistration, error) {
@@ -2273,11 +2293,65 @@ func (m *Manager) setState(s State) {
 	}
 }
 
+type startupServiceTask struct {
+	run  func(context.Context) error
+}
+
+func (m *Manager) runStartupServiceTasks(ctx context.Context, fatal bool, tasks []startupServiceTask) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	taskCtx := ctx
+	cancel := func() {}
+	if fatal {
+		taskCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			if fatal {
+				cancel()
+			}
+		}
+		mu.Unlock()
+	}
+
+	wg.Add(len(tasks))
+	for _, task := range tasks {
+		task := task
+		go func() {
+			defer wg.Done()
+			if err := taskCtx.Err(); err != nil {
+				recordErr(err)
+				return
+			}
+			if err := task.run(taskCtx); err != nil {
+				recordErr(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if fatal {
+		return firstErr
+	}
+	return nil
+}
+
 func (m *Manager) allocateServices(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var err error
 
 	if m.shouldAllocateDataPlaneAtStart() {
 		if err := m.ensureDataPlaneServices(ctx); err != nil {
@@ -2287,131 +2361,131 @@ func (m *Manager) allocateServices(ctx context.Context) error {
 		m.log.Debug("Skipping data-plane service allocation at startup")
 	}
 
-	// NAS
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	m.log.Debug("Allocating NAS client...")
-	m.nas, err = m.createNASService(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("failed to allocate NAS client: %w", ctx.Err())
-		}
-		m.log.WithError(err).Warn("Failed to allocate NAS client")
-	} else {
-		m.log.Debug("Allocated NAS client")
-		indCtx, cancel := contextWithMaxTimeout(ctx, m.cfg.Timeouts.IndicationRegister)
-		if err := m.withNASRecovery("allocateServices.NASRegisterIndications", func(nas *qmi.NASService) error {
-			return nas.RegisterIndicationsWithConfig(indCtx, qmi.NASIndicationRegistration{
-				ServingSystemChanged:        true,
-				SystemInfo:                  true,
-				NetworkTime:                 true,
-				SignalInfo:                  true,
-				OperatorName:                true,
-				NetworkReject:               true,
-				IncrementalNetworkScan:      true,
-				EventReportSignalThresholds: []int8{-60, -85},
-			})
-		}); err != nil {
-			if ctx.Err() != nil {
-				cancel()
-				return fmt.Errorf("failed to register NAS indications: %w", ctx.Err())
-			}
-			m.log.WithError(err).Warn("Failed to register NAS indications")
-		}
-		cancel()
-	}
-
-	// DMS
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	m.log.Debug("Allocating DMS client...")
-	m.dms, err = m.createDMSService(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("failed to allocate DMS client: %w", ctx.Err())
-		}
-		m.log.WithError(err).Warn("Failed to allocate DMS client")
-	} else {
-		m.log.Debug("Allocated DMS client")
-	}
-
-	// UIM
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	m.log.Debug("Allocating UIM client...")
-	m.uim, err = m.createUIMService(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("failed to allocate UIM client: %w", ctx.Err())
-		}
-		m.log.WithError(err).Warn("Failed to allocate UIM client")
-	} else {
-		m.log.Debug("Allocated UIM client")
-		indCtx, cancel := contextWithMaxTimeout(ctx, m.cfg.Timeouts.IndicationRegister)
-		acceptedMask, registerErr := m.registerUIMIndicationsWithContext(indCtx, m.uim)
-		cancel()
-		if registerErr != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("failed to register UIM indications: %w", ctx.Err())
-			}
-			m.log.WithError(registerErr).Warn("Failed to register UIM indications")
-		} else {
-			m.log.WithField("requested_mask", m.uimIndicationRegistrationMask()).WithField("accepted_mask", acceptedMask).Info("UIM indications registered")
-		}
-	}
-
-	// WMS (SMS)
-	if m.cfg.DisableWMSInd {
-		m.log.Debug("Skipping WMS client allocation")
-	} else {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		m.log.Debug("Allocating WMS client...")
-		m.wms, err = m.createWMSService(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("failed to allocate WMS client: %w", ctx.Err())
-			}
-			m.log.WithError(err).Warn("Failed to allocate WMS client")
-		} else {
-			m.log.Debug("Allocated WMS client")
-			m.recoverWMSStateWithContext(ctx)
-		}
-	}
-
-	// VOICE
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	m.log.Debug("Allocating VOICE client...")
-	m.voice, err = m.createVOICEService(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("failed to allocate VOICE client: %w", ctx.Err())
-		}
-		m.log.WithError(err).Warn("Failed to allocate VOICE client")
-	} else {
-		m.log.Debug("Allocated VOICE client")
-		if cfg, ok := m.voiceIndicationRegistration(); ok {
-			indCtx, cancel := contextWithMaxTimeout(ctx, m.cfg.Timeouts.IndicationRegister)
-			if err := m.withVOICERecovery("allocateServices.VOICEIndicationRegister", func(voice *qmi.VOICEService) error {
-				return voice.IndicationRegister(indCtx, cfg)
-			}); err != nil {
-				if ctx.Err() != nil {
-					cancel()
-					return fmt.Errorf("failed to register VOICE indications: %w", ctx.Err())
+	coreTasks := []startupServiceTask{
+		{
+			run: func(taskCtx context.Context) error {
+				m.log.Debug("Allocating NAS client...")
+				nas, err := m.createNASService(taskCtx)
+				if err != nil {
+					m.log.WithError(err).Warn("Failed to allocate NAS client")
+					return fmt.Errorf("failed to allocate NAS client: %w", err)
 				}
-				m.log.WithError(err).Warn("Failed to register VOICE indications")
-			}
-			cancel()
-		} else {
-			m.log.Debug("VOICE indications disabled by config")
-		}
+				m.log.Debug("Allocated NAS client")
+				m.mu.Lock()
+				m.nas = nas
+				m.mu.Unlock()
+
+				indCtx, cancel := contextWithMaxTimeout(taskCtx, m.cfg.Timeouts.IndicationRegister)
+				defer cancel()
+				if err := m.registerNASIndicationsWithContext(indCtx, qmi.NASIndicationRegistration{
+					ServingSystemChanged:        true,
+					SystemInfo:                  true,
+					NetworkTime:                 true,
+					SignalInfo:                  true,
+					OperatorName:                true,
+					NetworkReject:               true,
+					IncrementalNetworkScan:      true,
+					EventReportSignalThresholds: []int8{-60, -85},
+				}); err != nil {
+					m.log.WithError(err).Warn("Failed to register NAS indications")
+					return fmt.Errorf("failed to register NAS indications: %w", err)
+				}
+				return nil
+			},
+		},
+		{
+			run: func(taskCtx context.Context) error {
+				m.log.Debug("Allocating DMS client...")
+				dms, err := m.createDMSService(taskCtx)
+				if err != nil {
+					m.log.WithError(err).Warn("Failed to allocate DMS client")
+					return fmt.Errorf("failed to allocate DMS client: %w", err)
+				}
+				m.log.Debug("Allocated DMS client")
+				m.mu.Lock()
+				m.dms = dms
+				m.mu.Unlock()
+				return nil
+			},
+		},
+		{
+			run: func(taskCtx context.Context) error {
+				m.log.Debug("Allocating UIM client...")
+				uim, err := m.createUIMService(taskCtx)
+				if err != nil {
+					m.log.WithError(err).Warn("Failed to allocate UIM client")
+					return fmt.Errorf("failed to allocate UIM client: %w", err)
+				}
+				m.log.Debug("Allocated UIM client")
+				m.mu.Lock()
+				m.uim = uim
+				m.mu.Unlock()
+
+				indCtx, cancel := contextWithMaxTimeout(taskCtx, m.cfg.Timeouts.IndicationRegister)
+				defer cancel()
+				acceptedMask, registerErr := m.registerUIMIndicationsWithContext(indCtx, uim)
+				if registerErr != nil {
+					m.log.WithError(registerErr).Warn("Failed to register UIM indications")
+					return fmt.Errorf("failed to register UIM indications: %w", registerErr)
+				}
+				m.log.WithField("requested_mask", m.uimIndicationRegistrationMask()).WithField("accepted_mask", acceptedMask).Info("UIM indications registered")
+				return nil
+			},
+		},
 	}
+	if err := m.runStartupServiceTasks(ctx, true, coreTasks); err != nil {
+		return err
+	}
+
+	auxTasks := []startupServiceTask{
+		{
+			run: func(taskCtx context.Context) error {
+				if m.cfg.DisableWMSInd {
+					m.log.Debug("Skipping WMS client allocation")
+					return nil
+				}
+				m.log.Debug("Allocating WMS client...")
+				wms, err := m.createWMSService(taskCtx)
+				if err != nil {
+					m.log.WithError(err).Warn("Failed to allocate WMS client")
+					return err
+				}
+				m.log.Debug("Allocated WMS client")
+				m.mu.Lock()
+				m.wms = wms
+				m.mu.Unlock()
+				m.recoverWMSStateWithContext(taskCtx)
+				return nil
+			},
+		},
+		{
+			run: func(taskCtx context.Context) error {
+				m.log.Debug("Allocating VOICE client...")
+				voice, err := m.createVOICEService(taskCtx)
+				if err != nil {
+					m.log.WithError(err).Warn("Failed to allocate VOICE client")
+					return err
+				}
+				m.log.Debug("Allocated VOICE client")
+				m.mu.Lock()
+				m.voice = voice
+				m.mu.Unlock()
+
+				if cfg, ok := m.voiceIndicationRegistration(); ok {
+					indCtx, cancel := contextWithMaxTimeout(taskCtx, m.cfg.Timeouts.IndicationRegister)
+					defer cancel()
+					if err := m.registerVOICEIndicationsWithContext(indCtx, cfg); err != nil {
+						m.log.WithError(err).Warn("Failed to register VOICE indications")
+						return err
+					}
+				} else {
+					m.log.Debug("VOICE indications disabled by config")
+				}
+				return nil
+			},
+		},
+	}
+	_ = m.runStartupServiceTasks(ctx, false, auxTasks)
 
 	// IMS/IMSA/IMSP
 	// 当前设备族在这些服务上经常返回 CTL client-id 分配失败（如 0x001f），
@@ -3034,14 +3108,7 @@ func (m *Manager) doRecoverFromModemReset() bool {
 	identityErr := m.waitIdentityReadable(identityCtx)
 	identityCancel()
 	if identityErr != nil {
-		m.mu.Lock()
-		m.markCoreNotReadyLocked("recover_wait_identity", identityErr)
-		m.mu.Unlock()
-		m.log.WithError(identityErr).Warn("QMI identity gate not satisfied after reset recovery")
-		if !m.hasPendingModemReset() {
-			m.scheduleRecoverRetry("identity_gate")
-		}
-		return false
+		m.log.WithError(identityErr).Warn("QMI identity gate not satisfied after reset recovery (core recovery proceeds anyway)")
 	}
 
 	m.recoverCount = 0

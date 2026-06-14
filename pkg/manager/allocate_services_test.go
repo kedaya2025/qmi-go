@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,15 +56,11 @@ func TestAllocateServicesSkipsWMSAndWDAWhenDisabledButKeepsVOICE(t *testing.T) {
 	}
 	m.client = &qmi.Client{}
 
-	m.newNASService = func(context.Context, *qmi.Client) (*qmi.NASService, error) {
-		return nil, fmt.Errorf("NAS unavailable")
-	}
-	m.newDMSService = func(context.Context, *qmi.Client) (*qmi.DMSService, error) {
-		return nil, fmt.Errorf("DMS unavailable")
-	}
-	m.newUIMService = func(context.Context, *qmi.Client) (*qmi.UIMService, error) {
-		return nil, fmt.Errorf("UIM unavailable")
-	}
+	m.newNASService = func(context.Context, *qmi.Client) (*qmi.NASService, error) { return &qmi.NASService{}, nil }
+	m.newDMSService = func(context.Context, *qmi.Client) (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
+	m.newUIMService = func(context.Context, *qmi.Client) (*qmi.UIMService, error) { return &qmi.UIMService{}, nil }
+	m.registerNASIndications = func(context.Context, qmi.NASIndicationRegistration) error { return nil }
+	m.registerUIMIndications = func(context.Context) (uint32, error) { return 0, nil }
 
 	wdaCalls := 0
 	wmsCalls := 0
@@ -118,15 +115,11 @@ func TestAllocateServicesLazyDataPlaneSkipsWDSAndWDAButKeepsVOICE(t *testing.T) 
 		wdaCalls++
 		return &qmi.WDAService{}, nil
 	}
-	m.newNASService = func(context.Context, *qmi.Client) (*qmi.NASService, error) {
-		return nil, fmt.Errorf("NAS unavailable")
-	}
-	m.newDMSService = func(context.Context, *qmi.Client) (*qmi.DMSService, error) {
-		return nil, fmt.Errorf("DMS unavailable")
-	}
-	m.newUIMService = func(context.Context, *qmi.Client) (*qmi.UIMService, error) {
-		return nil, fmt.Errorf("UIM unavailable")
-	}
+	m.newNASService = func(context.Context, *qmi.Client) (*qmi.NASService, error) { return &qmi.NASService{}, nil }
+	m.newDMSService = func(context.Context, *qmi.Client) (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
+	m.newUIMService = func(context.Context, *qmi.Client) (*qmi.UIMService, error) { return &qmi.UIMService{}, nil }
+	m.registerNASIndications = func(context.Context, qmi.NASIndicationRegistration) error { return nil }
+	m.registerUIMIndications = func(context.Context) (uint32, error) { return 0, nil }
 	m.newVOICEService = func(context.Context, *qmi.Client) (*qmi.VOICEService, error) {
 		voiceCalls++
 		return &qmi.VOICEService{}, nil
@@ -140,6 +133,98 @@ func TestAllocateServicesLazyDataPlaneSkipsWDSAndWDAButKeepsVOICE(t *testing.T) 
 	}
 	if voiceCalls != 1 {
 		t.Fatalf("VOICE allocations=%d want 1", voiceCalls)
+	}
+}
+
+func TestAllocateServicesReturnsErrorWhenCoreServiceAllocationFails(t *testing.T) {
+	tests := []struct {
+		name string
+		hook func(*Manager, error)
+		want string
+	}{
+		{
+			name: "NAS",
+			hook: func(m *Manager, err error) {
+				m.newNASService = func(context.Context, *qmi.Client) (*qmi.NASService, error) { return nil, err }
+			},
+			want: "failed to allocate NAS client",
+		},
+		{
+			name: "DMS",
+			hook: func(m *Manager, err error) {
+				m.newDMSService = func(context.Context, *qmi.Client) (*qmi.DMSService, error) { return nil, err }
+			},
+			want: "failed to allocate DMS client",
+		},
+		{
+			name: "UIM",
+			hook: func(m *Manager, err error) {
+				m.newUIMService = func(context.Context, *qmi.Client) (*qmi.UIMService, error) { return nil, err }
+			},
+			want: "failed to allocate UIM client",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newRecoveryTestManager()
+			m.cfg = Config{DisableWMSInd: true, DisableVOICEInd: true}
+			m.client = &qmi.Client{}
+			m.newNASService = func(context.Context, *qmi.Client) (*qmi.NASService, error) {
+				return &qmi.NASService{}, nil
+			}
+			m.newDMSService = func(context.Context, *qmi.Client) (*qmi.DMSService, error) {
+				return &qmi.DMSService{}, nil
+			}
+			m.newUIMService = func(context.Context, *qmi.Client) (*qmi.UIMService, error) {
+				return &qmi.UIMService{}, nil
+			}
+			m.newVOICEService = func(context.Context, *qmi.Client) (*qmi.VOICEService, error) {
+				return &qmi.VOICEService{}, nil
+			}
+			m.registerNASIndications = func(context.Context, qmi.NASIndicationRegistration) error {
+				return nil
+			}
+			m.registerUIMIndications = func(context.Context) (uint32, error) {
+				return 0, nil
+			}
+			coreErr := fmt.Errorf("%s unavailable", tt.name)
+			tt.hook(m, coreErr)
+			err := m.allocateServices(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("allocateServices() error=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllocateServicesContinuesWhenAuxiliaryServiceAllocationFails(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.client = &qmi.Client{}
+	m.newNASService = func(context.Context, *qmi.Client) (*qmi.NASService, error) {
+		return &qmi.NASService{}, nil
+	}
+	m.newDMSService = func(context.Context, *qmi.Client) (*qmi.DMSService, error) {
+		return &qmi.DMSService{}, nil
+	}
+	m.newUIMService = func(context.Context, *qmi.Client) (*qmi.UIMService, error) {
+		return &qmi.UIMService{}, nil
+	}
+	m.registerNASIndications = func(context.Context, qmi.NASIndicationRegistration) error {
+		return nil
+	}
+	m.registerUIMIndications = func(context.Context) (uint32, error) {
+		return 0, nil
+	}
+	m.newWMSService = func(context.Context, *qmi.Client) (*qmi.WMSService, error) {
+		return nil, fmt.Errorf("WMS unavailable")
+	}
+	m.newVOICEService = func(context.Context, *qmi.Client) (*qmi.VOICEService, error) {
+		return nil, fmt.Errorf("VOICE unavailable")
+	}
+
+	if err := m.allocateServices(context.Background()); err != nil {
+		t.Fatalf("allocateServices() error=%v, want nil for auxiliary failures", err)
 	}
 }
 

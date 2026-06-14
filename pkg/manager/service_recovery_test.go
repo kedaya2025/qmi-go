@@ -90,7 +90,7 @@ func TestServiceTimeoutBelowThresholdDoesNotRecover(t *testing.T) {
 	}
 }
 
-func TestServiceTimeoutThresholdTriggersCoreRecovery(t *testing.T) {
+func TestDMSServiceTimeoutThresholdRebindsWithoutCoreRecovery(t *testing.T) {
 	m := newRecoveryTestManager()
 	m.cfg = normalizeConfig(Config{
 		RecoveryPolicy: RecoveryPolicy{
@@ -122,8 +122,10 @@ func TestServiceTimeoutThresholdTriggersCoreRecovery(t *testing.T) {
 	if rebindCalls != 1 {
 		t.Fatalf("expected one rebind at timeout threshold, got %d", rebindCalls)
 	}
-	if evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second); evt != eventModemReset {
-		t.Fatalf("expected eventModemReset, got %v", evt)
+	select {
+	case evt := <-m.eventCh:
+		t.Fatalf("expected no core recovery event for DMS timeout, got %v", evt)
+	default:
 	}
 	stats := m.Stats()
 	if stats.ServiceTimeouts != 4 {
@@ -131,6 +133,38 @@ func TestServiceTimeoutThresholdTriggersCoreRecovery(t *testing.T) {
 	}
 	if stats.ServiceTimeoutRecoveries != 1 {
 		t.Fatalf("expected service_timeout_recoveries=1, got %d", stats.ServiceTimeoutRecoveries)
+	}
+}
+
+func TestNASServiceTimeoutThresholdTriggersCoreRecovery(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.cfg = normalizeConfig(Config{
+		RecoveryPolicy: RecoveryPolicy{
+			ServiceTimeoutThreshold: 2,
+			ServiceTimeoutWindow:    time.Minute,
+			ServiceRecoverCooldown:  10 * time.Millisecond,
+		},
+	})
+	m.coreReady = true
+	m.state = StateDisconnected
+	m.ensureNASServiceHook = func() (*qmi.NASService, error) { return &qmi.NASService{}, nil }
+	m.rebindNASServiceHook = func(reason string) (*qmi.NASService, error) {
+		if reason != "recover:NAS.TimeoutOp" {
+			t.Fatalf("unexpected rebind reason: %q", reason)
+		}
+		return &qmi.NASService{}, nil
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := withNASRecoveryValue(m, "NAS.TimeoutOp", func(nas *qmi.NASService) (struct{}, error) {
+			return struct{}{}, context.DeadlineExceeded
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("attempt %d error=%v, want context deadline exceeded", i+1, err)
+		}
+	}
+	if evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second); evt != eventModemReset {
+		t.Fatalf("expected eventModemReset, got %v", evt)
 	}
 }
 
@@ -367,14 +401,16 @@ func TestWMSRecoveryRebindThenRetrySuccessAndReplay(t *testing.T) {
 
 func TestServiceRecoveryRebindFailureTriggersCoreRecovery(t *testing.T) {
 	type tc struct {
-		name   string
-		invoke func(m *Manager) error
+		name              string
+		expectCoreRecovery bool
+		invoke            func(m *Manager) error
 	}
 
 	cases := []tc{
-		{
-			name: "DMS",
-			invoke: func(m *Manager) error {
+			{
+				name: "DMS",
+				expectCoreRecovery: false,
+				invoke: func(m *Manager) error {
 				m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
 				m.rebindDMSServiceHook = func(reason string) (*qmi.DMSService, error) { return nil, ctlGetClientIDFailure() }
 				return m.withDMSRecovery("DMS.Op", func(dms *qmi.DMSService) error {
@@ -382,9 +418,10 @@ func TestServiceRecoveryRebindFailureTriggersCoreRecovery(t *testing.T) {
 				})
 			},
 		},
-		{
-			name: "NAS",
-			invoke: func(m *Manager) error {
+			{
+				name: "NAS",
+				expectCoreRecovery: true,
+				invoke: func(m *Manager) error {
 				m.ensureNASServiceHook = func() (*qmi.NASService, error) { return &qmi.NASService{}, nil }
 				m.rebindNASServiceHook = func(reason string) (*qmi.NASService, error) { return nil, ctlGetClientIDFailure() }
 				return m.withNASRecovery("NAS.Op", func(nas *qmi.NASService) error {
@@ -392,9 +429,10 @@ func TestServiceRecoveryRebindFailureTriggersCoreRecovery(t *testing.T) {
 				})
 			},
 		},
-		{
-			name: "WMS",
-			invoke: func(m *Manager) error {
+			{
+				name: "WMS",
+				expectCoreRecovery: false,
+				invoke: func(m *Manager) error {
 				m.ensureWMSServiceHook = func() (*qmi.WMSService, error) { return &qmi.WMSService{}, nil }
 				m.rebindWMSServiceHook = func(reason string) (*qmi.WMSService, error) { return nil, ctlGetClientIDFailure() }
 				return m.withWMSRecovery("WMS.Op", func(wms *qmi.WMSService) error {
@@ -402,9 +440,10 @@ func TestServiceRecoveryRebindFailureTriggersCoreRecovery(t *testing.T) {
 				})
 			},
 		},
-		{
-			name: "VOICE",
-			invoke: func(m *Manager) error {
+			{
+				name: "VOICE",
+				expectCoreRecovery: false,
+				invoke: func(m *Manager) error {
 				m.ensureVOICEServiceHook = func() (*qmi.VOICEService, error) { return &qmi.VOICEService{}, nil }
 				m.rebindVOICEServiceHook = func(reason string) (*qmi.VOICEService, error) { return nil, ctlGetClientIDFailure() }
 				return m.withVOICERecovery("VOICE.Op", func(voice *qmi.VOICEService) error {
@@ -419,28 +458,38 @@ func TestServiceRecoveryRebindFailureTriggersCoreRecovery(t *testing.T) {
 			m := newRecoveryTestManager()
 			m.coreReady = true
 			m.state = StateDisconnected
-			err := c.invoke(m)
-			if err == nil {
-				t.Fatal("expected error when rebind fails")
-			}
-			evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second)
-			if evt != eventModemReset {
-				t.Fatalf("expected eventModemReset, got %v", evt)
-			}
-		})
-	}
+				err := c.invoke(m)
+				if err == nil {
+					t.Fatal("expected error when rebind fails")
+				}
+				if c.expectCoreRecovery {
+					evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second)
+					if evt != eventModemReset {
+						t.Fatalf("expected eventModemReset, got %v", evt)
+					}
+					return
+				}
+				select {
+				case evt := <-m.eventCh:
+					t.Fatalf("expected no core recovery event, got %v", evt)
+				case <-time.After(150 * time.Millisecond):
+				}
+			})
+		}
 }
 
 func TestServiceRecoveryRetryFailureTriggersCoreRecovery(t *testing.T) {
 	type tc struct {
-		name   string
-		invoke func(m *Manager) (int, error)
+		name              string
+		expectCoreRecovery bool
+		invoke            func(m *Manager) (int, error)
 	}
 
 	cases := []tc{
-		{
-			name: "DMS",
-			invoke: func(m *Manager) (int, error) {
+			{
+				name: "DMS",
+				expectCoreRecovery: false,
+				invoke: func(m *Manager) (int, error) {
 				attempts := 0
 				m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
 				m.rebindDMSServiceHook = func(reason string) (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
@@ -451,9 +500,10 @@ func TestServiceRecoveryRetryFailureTriggersCoreRecovery(t *testing.T) {
 				return attempts, err
 			},
 		},
-		{
-			name: "NAS",
-			invoke: func(m *Manager) (int, error) {
+			{
+				name: "NAS",
+				expectCoreRecovery: true,
+				invoke: func(m *Manager) (int, error) {
 				attempts := 0
 				m.ensureNASServiceHook = func() (*qmi.NASService, error) { return &qmi.NASService{}, nil }
 				m.rebindNASServiceHook = func(reason string) (*qmi.NASService, error) { return &qmi.NASService{}, nil }
@@ -464,9 +514,10 @@ func TestServiceRecoveryRetryFailureTriggersCoreRecovery(t *testing.T) {
 				return attempts, err
 			},
 		},
-		{
-			name: "WMS",
-			invoke: func(m *Manager) (int, error) {
+			{
+				name: "WMS",
+				expectCoreRecovery: false,
+				invoke: func(m *Manager) (int, error) {
 				attempts := 0
 				m.ensureWMSServiceHook = func() (*qmi.WMSService, error) { return &qmi.WMSService{}, nil }
 				m.rebindWMSServiceHook = func(reason string) (*qmi.WMSService, error) { return &qmi.WMSService{}, nil }
@@ -478,9 +529,10 @@ func TestServiceRecoveryRetryFailureTriggersCoreRecovery(t *testing.T) {
 				return attempts, err
 			},
 		},
-		{
-			name: "VOICE",
-			invoke: func(m *Manager) (int, error) {
+			{
+				name: "VOICE",
+				expectCoreRecovery: false,
+				invoke: func(m *Manager) (int, error) {
 				attempts := 0
 				m.ensureVOICEServiceHook = func() (*qmi.VOICEService, error) { return &qmi.VOICEService{}, nil }
 				m.rebindVOICEServiceHook = func(reason string) (*qmi.VOICEService, error) { return &qmi.VOICEService{}, nil }
@@ -502,15 +554,23 @@ func TestServiceRecoveryRetryFailureTriggersCoreRecovery(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected retry failure")
 			}
-			if attempts != 2 {
-				t.Fatalf("expected 2 attempts, got %d", attempts)
-			}
-			evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second)
-			if evt != eventModemReset {
-				t.Fatalf("expected eventModemReset, got %v", evt)
-			}
-		})
-	}
+				if attempts != 2 {
+					t.Fatalf("expected 2 attempts, got %d", attempts)
+				}
+				if c.expectCoreRecovery {
+					evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second)
+					if evt != eventModemReset {
+						t.Fatalf("expected eventModemReset, got %v", evt)
+					}
+					return
+				}
+				select {
+				case evt := <-m.eventCh:
+					t.Fatalf("expected no core recovery event, got %v", evt)
+				case <-time.After(150 * time.Millisecond):
+				}
+			})
+		}
 }
 
 func TestServiceRecoveryCooldownSuppressesRepeatedCoreRecovery(t *testing.T) {
@@ -519,19 +579,19 @@ func TestServiceRecoveryCooldownSuppressesRepeatedCoreRecovery(t *testing.T) {
 	m.state = StateDisconnected
 	m.uimRecoverCooldown = time.Hour
 
-	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
-	m.rebindDMSServiceHook = func(reason string) (*qmi.DMSService, error) { return nil, ctlGetClientIDFailure() }
-	_ = m.withDMSRecovery("DMS.Op", func(dms *qmi.DMSService) error {
-		return recoverableQMIError(qmi.ServiceDMS, 0x0025)
+	m.ensureNASServiceHook = func() (*qmi.NASService, error) { return &qmi.NASService{}, nil }
+	m.rebindNASServiceHook = func(reason string) (*qmi.NASService, error) { return nil, ctlGetClientIDFailure() }
+	_ = m.withNASRecovery("NAS.Op", func(nas *qmi.NASService) error {
+		return recoverableQMIError(qmi.ServiceNAS, qmi.NASGetServingSystem)
 	})
 	if evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second); evt != eventModemReset {
 		t.Fatalf("expected first event to be modem reset, got %v", evt)
 	}
 
-	m.ensureNASServiceHook = func() (*qmi.NASService, error) { return &qmi.NASService{}, nil }
-	m.rebindNASServiceHook = func(reason string) (*qmi.NASService, error) { return nil, ctlGetClientIDFailure() }
-	_ = m.withNASRecovery("NAS.Op", func(nas *qmi.NASService) error {
-		return recoverableQMIError(qmi.ServiceNAS, qmi.NASGetServingSystem)
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) { return &qmi.UIMService{}, nil }
+	m.rebindUIMServiceHook = func(reason string) (*qmi.UIMService, error) { return nil, ctlGetClientIDFailure() }
+	_ = m.withUIMRecovery("UIM.Op", func(uim *qmi.UIMService) error {
+		return recoverableQMIError(qmi.ServiceUIM, qmi.UIMGetSlotStatus)
 	})
 
 	select {
