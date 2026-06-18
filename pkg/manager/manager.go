@@ -225,6 +225,10 @@ type Manager struct {
 	serviceTimeoutMu        sync.Mutex
 	serviceTimeoutFailures  map[serviceTimeoutKey]serviceTimeoutWindow
 
+	globalTimeoutMu       sync.Mutex
+	globalTimeoutServices map[string]time.Time
+	globalTimeoutStormAt  time.Time
+
 	// SMS recovery state / 短信恢复状态
 	lastKnownGoodRoutes        *qmi.WMSRouteConfig
 	wmsTransportStatus         qmi.WMSTransportNetworkRegistration

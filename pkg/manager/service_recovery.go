@@ -123,6 +123,9 @@ func (m *Manager) recordServiceTimeoutFailure(service string, op string, err err
 		WithField("timeout_count", state.count).
 		WithField("timeout_threshold", threshold).
 		WithField("timeout_window_ms", window.Milliseconds())
+
+	m.detectTimeoutStorm(key.service)
+
 	if reached {
 		if firstReached {
 			m.serviceTimeoutRecoveries.Add(1)
@@ -134,6 +137,37 @@ func (m *Manager) recordServiceTimeoutFailure(service string, op string, err err
 	}
 	entry.WithError(err).Debug("Service operation timeout observed below recovery threshold")
 	return false
+}
+
+func (m *Manager) detectTimeoutStorm(service string) {
+	const stormWindow = 5 * time.Second
+	const stormMinSvcs = 2
+	const stormCooldown = 30 * time.Second
+
+	m.globalTimeoutMu.Lock()
+	defer m.globalTimeoutMu.Unlock()
+
+	now := time.Now()
+	if m.globalTimeoutServices == nil {
+		m.globalTimeoutServices = make(map[string]time.Time)
+	}
+	
+	for svc, t := range m.globalTimeoutServices {
+		if now.Sub(t) > stormWindow {
+			delete(m.globalTimeoutServices, svc)
+		}
+	}
+	m.globalTimeoutServices[service] = now
+
+	if len(m.globalTimeoutServices) >= stormMinSvcs {
+		if m.globalTimeoutStormAt.IsZero() || now.Sub(m.globalTimeoutStormAt) > stormCooldown {
+			m.globalTimeoutStormAt = now
+			m.globalTimeoutServices = make(map[string]time.Time)
+			m.log.Warn("Timeout storm detected; triggering immediate core recovery",
+				"services_affected", len(m.globalTimeoutServices))
+			m.enqueueModemResetEvent("timeout_storm")
+		}
+	}
 }
 
 func (m *Manager) noteServiceOperationSuccess(service string, op string) {
@@ -298,7 +332,8 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 		return retryResult, nil
 	}
 	if m.shouldRecoverDMSError(op, retryErr) {
-		m.logServiceRecovery("DMS", op, "retry", retryErr, "DMS operation still failing after rebind (core recovery skipped)")
+		m.logServiceRecovery("DMS", op, "retry", retryErr, "DMS operation still failing after rebind; escalating to core recovery")
+		m.triggerCoreRecoveryFromService("DMS", op, "retry", retryErr)
 	}
 	return retryResult, retryErr
 }
