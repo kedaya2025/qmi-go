@@ -3883,29 +3883,60 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 
 			hasServingTLV := qmi.FindTLV(evt.Packet.TLVs, 0x01) != nil
 			hasPLMNTLV := qmi.FindTLV(evt.Packet.TLVs, 0x12) != nil
-			m.log.Debugf("NAS serving indication TLVs: has_0x01=%v has_0x12=%v", hasServingTLV, hasPLMNTLV)
 			if hasServingTLV || hasPLMNTLV {
 				info, err := qmi.ParseServingSystemIndication(evt.Packet)
 				if err != nil {
 					m.log.WithError(err).Warn("Failed to parse NAS serving system indication")
 				} else {
+					if hasPLMNTLV && info.MCC == 0 && info.MNC == 0 {
+						// 过滤基带偶发的无效 PLMN，防止缓存被冲刷
+						hasPLMNTLV = false
+					}
 					current, _ := m.snapshot.ServingSystem()
 					previousServing = current
+					
+					isChanged := false
 					if current != nil {
+						if hasServingTLV {
+							if info.RegistrationState != current.RegistrationState {
+								isReg1 := info.RegistrationState == qmi.RegStateRegistered || info.RegistrationState == qmi.RegStateRoaming
+								isReg2 := current.RegistrationState == qmi.RegStateRegistered || current.RegistrationState == qmi.RegStateRoaming
+								if !(isReg1 && isReg2) {
+									isChanged = true
+								}
+							}
+							if info.PSAttached != current.PSAttached ||
+								info.RadioInterface != current.RadioInterface {
+								isChanged = true
+							}
+							if !hasPLMNTLV {
+								info.MCC = current.MCC
+								info.MNC = current.MNC
+							}
+						}
+						if hasPLMNTLV {
+							// 过滤基带偶尔抽风上报的无效(全0) PLMN，避免误判和冲刷掉真实缓存
+							if (info.MCC != 0 || info.MNC != 0) && (info.MCC != current.MCC || info.MNC != current.MNC) {
+								isChanged = true
+							}
+							if !hasServingTLV {
+								info.RegistrationState = current.RegistrationState
+								info.PSAttached = current.PSAttached
+								info.RadioInterface = current.RadioInterface
+							}
+						}
+					} else {
+						isChanged = true
 						if !hasServingTLV {
-							// 仅 PLMN 更新场景：保留已知注册态/RAT 信息。
-							info.RegistrationState = current.RegistrationState
-							info.PSAttached = current.PSAttached
-							info.RadioInterface = current.RadioInterface
+							info.RegistrationState = qmi.RegStateUnknown
 						}
-						if !hasPLMNTLV {
-							// 仅 Serving 更新场景：保留已知 PLMN。
-							info.MCC = current.MCC
-							info.MNC = current.MNC
-						}
-					} else if !hasServingTLV {
-						info.RegistrationState = qmi.RegStateUnknown
 					}
+
+					if !isChanged {
+						return
+					}
+
+					m.log.Debugf("NAS serving indication TLVs: has_0x01=%v has_0x12=%v", hasServingTLV, hasPLMNTLV)
 					event.ServingSystem = info
 					switch {
 					case hasServingTLV && hasPLMNTLV:
@@ -4288,6 +4319,8 @@ func shouldLogRawIndication(evt qmi.Event) bool {
 		return false
 	case qmi.EventNASEventReport:
 		return !isEmptyNASEventReport(evt)
+	case qmi.EventServingSystemChanged, qmi.EventNASSignalInfoChanged:
+		return false
 	default:
 		return true
 	}
