@@ -111,6 +111,15 @@ func (m *Manager) GetCachedIdentitiesReadiness() (bool, bool) {
 	return m.snapshot.IdentityReadiness()
 }
 
+// CTLGetServiceVersions 获取底层通信 Client 缓存的 QMI 服务版本信息。
+// 仅在 client 成功初始化后调用有效，否则返回 nil。
+func (m *Manager) CTLGetServiceVersions() map[uint8]qmi.ServiceVersion {
+	if m == nil || m.client == nil {
+		return nil
+	}
+	return m.client.GetCachedServiceVersions()
+}
+
 // GetDeviceSerialNumbers 获取设备序列号信息（含 IMEI）
 func (m *Manager) GetDeviceSerialNumbers(ctx context.Context) (*qmi.DeviceInfo, error) {
 	return withDMSRecoveryValue(m, "GetDeviceSerialNumbers", func(dms *qmi.DMSService) (*qmi.DeviceInfo, error) {

@@ -2361,6 +2361,15 @@ func (m *Manager) runStartupServiceTasks(ctx context.Context, fatal bool, tasks 
 	return nil
 }
 
+// hasQMIService 检查底层 Client 是否声明支持该服务。
+// 仅在 client 初始化完成后调用有效。
+func (m *Manager) hasQMIService(service uint8) bool {
+	if m.client == nil {
+		return false
+	}
+	return m.client.HasService(service)
+}
+
 func (m *Manager) allocateServices(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -2457,6 +2466,10 @@ func (m *Manager) allocateServices(ctx context.Context) error {
 					m.log.Debug("Skipping WMS client allocation")
 					return nil
 				}
+				if !m.hasQMIService(qmi.ServiceWMS) {
+					m.log.Debug("Skipping WMS client allocation (modem not supported)")
+					return nil
+				}
 				m.log.Debug("Allocating WMS client...")
 				wms, err := m.createWMSService(taskCtx)
 				if err != nil {
@@ -2473,6 +2486,10 @@ func (m *Manager) allocateServices(ctx context.Context) error {
 		},
 		{
 			run: func(taskCtx context.Context) error {
+				if !m.hasQMIService(qmi.ServiceVOICE) {
+					m.log.Debug("Skipping VOICE client allocation (modem not supported)")
+					return nil
+				}
 				m.log.Debug("Allocating VOICE client...")
 				voice, err := m.createVOICEService(taskCtx)
 				if err != nil {

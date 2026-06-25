@@ -122,10 +122,8 @@ func TestDMSServiceTimeoutThresholdRebindsWithoutCoreRecovery(t *testing.T) {
 	if rebindCalls != 1 {
 		t.Fatalf("expected one rebind at timeout threshold, got %d", rebindCalls)
 	}
-	select {
-	case evt := <-m.eventCh:
-		t.Fatalf("expected no core recovery event for DMS timeout, got %v", evt)
-	default:
+	if evt := waitInternalRecoveryEvent(t, m.eventCh, time.Second); evt != eventModemReset {
+		t.Fatalf("expected eventModemReset, got %v", evt)
 	}
 	stats := m.Stats()
 	if stats.ServiceTimeouts != 4 {
@@ -488,7 +486,7 @@ func TestServiceRecoveryRetryFailureTriggersCoreRecovery(t *testing.T) {
 	cases := []tc{
 		{
 			name:               "DMS",
-			expectCoreRecovery: false,
+			expectCoreRecovery: true,
 			invoke: func(m *Manager) (int, error) {
 				attempts := 0
 				m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
