@@ -16,9 +16,6 @@ type IMSPService struct {
 }
 
 func NewIMSPService(client *Client) (*IMSPService, error) {
-	if !client.HasService(ServiceIMSP) {
-		return nil, ErrServiceNotSupported
-	}
 	clientID, err := client.AllocateClientID(ServiceIMSP)
 	if err != nil {
 		return nil, err

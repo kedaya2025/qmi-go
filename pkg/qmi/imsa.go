@@ -16,9 +16,6 @@ type IMSAService struct {
 }
 
 func NewIMSAService(client *Client) (*IMSAService, error) {
-	if !client.HasService(ServiceIMSA) {
-		return nil, ErrServiceNotSupported
-	}
 	clientID, err := client.AllocateClientID(ServiceIMSA)
 	if err != nil {
 		return nil, err

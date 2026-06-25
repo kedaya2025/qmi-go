@@ -25,6 +25,10 @@ func shouldRecoverServiceError(service string, err error, serviceUnavailableText
 		return false
 	}
 
+	if errors.Is(err, qmi.ErrServiceNotSupported) {
+		return false
+	}
+
 	var notReady *ServiceNotReadyError
 	if errors.As(err, &notReady) && strings.EqualFold(strings.TrimSpace(notReady.Service), strings.TrimSpace(service)) {
 		return true

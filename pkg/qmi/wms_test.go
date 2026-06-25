@@ -1,7 +1,9 @@
 package qmi
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -493,6 +495,18 @@ func TestNewWMSService_Unsupported(t *testing.T) {
 	
 	_, err := NewWMSService(client)
 	if err != ErrServiceNotSupported {
+		t.Fatalf("expected ErrServiceNotSupported, got %v", err)
+	}
+}
+
+func TestNewWMSServiceWithContext_Unsupported(t *testing.T) {
+	client := &Client{
+		versionQueried:  true,
+		serviceVersions: map[uint8]ServiceVersion{},
+	}
+
+	_, err := NewWMSServiceWithContext(context.Background(), client)
+	if !errors.Is(err, ErrServiceNotSupported) {
 		t.Fatalf("expected ErrServiceNotSupported, got %v", err)
 	}
 }

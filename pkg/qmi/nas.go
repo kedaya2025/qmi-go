@@ -457,9 +457,6 @@ type NASService struct {
 
 // NewNASService creates a NAS service wrapper / NewNASService创建一个NAS服务包装器
 func NewNASService(client *Client) (*NASService, error) {
-	if !client.HasService(ServiceNAS) {
-		return nil, ErrServiceNotSupported
-	}
 	return NewNASServiceWithContext(context.Background(), client)
 }
 

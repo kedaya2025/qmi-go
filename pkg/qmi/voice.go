@@ -16,9 +16,6 @@ type VOICEService struct {
 }
 
 func NewVOICEService(client *Client) (*VOICEService, error) {
-	if !client.HasService(ServiceVOICE) {
-		return nil, ErrServiceNotSupported
-	}
 	return NewVOICEServiceWithContext(context.Background(), client)
 }
 

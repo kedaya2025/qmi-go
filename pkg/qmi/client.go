@@ -344,6 +344,16 @@ func (c *Client) HasService(service uint8) bool {
 	return ok
 }
 
+func (c *Client) ensureServiceAllocatable(service uint8) error {
+	if !c.versionQueried {
+		return nil
+	}
+	if _, ok := c.serviceVersions[service]; ok {
+		return nil
+	}
+	return ErrServiceNotSupported
+}
+
 // GetCachedServiceVersions 返回缓存的服务版本信息。
 // 如果尚未查询过，返回 nil。
 func (c *Client) GetCachedServiceVersions() map[uint8]ServiceVersion {
@@ -1007,6 +1017,10 @@ func (c *Client) AllocateClientID(service uint8) (uint8, error) {
 }
 
 func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8) (uint8, error) {
+	if err := c.ensureServiceAllocatable(service); err != nil {
+		return 0, err
+	}
+
 	var lastErr error
 	for retry := 0; retry < 3; retry++ {
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 20*time.Second)

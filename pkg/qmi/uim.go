@@ -292,9 +292,6 @@ type UIMRefreshIndication struct {
 
 // NewUIMService creates a UIM service wrapper / NewUIMService创建一个UIM服务包装器
 func NewUIMService(client *Client) (*UIMService, error) {
-	if !client.HasService(ServiceUIM) {
-		return nil, ErrServiceNotSupported
-	}
 	return NewUIMServiceWithContext(context.Background(), client)
 }
 

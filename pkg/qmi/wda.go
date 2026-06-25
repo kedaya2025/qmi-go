@@ -38,9 +38,6 @@ type WDAService struct {
 
 // NewWDAService creates a new WDA client / NewWDAService创建一个新的WDA客户端
 func NewWDAService(client *Client) (*WDAService, error) {
-	if !client.HasService(ServiceWDA) {
-		return nil, ErrServiceNotSupported
-	}
 	return NewWDAServiceWithContext(context.Background(), client)
 }
 

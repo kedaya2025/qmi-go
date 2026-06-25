@@ -188,9 +188,6 @@ type DMSService struct {
 
 // NewDMSService creates a DMS service wrapper / NewDMSService创建一个DMS服务包装器
 func NewDMSService(client *Client) (*DMSService, error) {
-	if !client.HasService(ServiceDMS) {
-		return nil, ErrServiceNotSupported
-	}
 	return NewDMSServiceWithContext(context.Background(), client)
 }
 

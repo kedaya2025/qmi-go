@@ -24,9 +24,6 @@ type rawReadMessageValue struct {
 
 // NewWMSService creates a WMS service wrapper / NewWMSService 创建 WMS 服务封装
 func NewWMSService(client *Client) (*WMSService, error) {
-	if !client.HasService(ServiceWMS) {
-		return nil, ErrServiceNotSupported
-	}
 	return NewWMSServiceWithContext(context.Background(), client)
 }
 

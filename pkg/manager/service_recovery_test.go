@@ -32,6 +32,13 @@ func waitInternalRecoveryEvent(t *testing.T, ch <-chan internalEvent, timeout ti
 	}
 }
 
+func TestServiceNotSupportedDoesNotTriggerRecovery(t *testing.T) {
+	err := fmt.Errorf("allocate WMS: %w", qmi.ErrServiceNotSupported)
+	if shouldRecoverServiceError("WMS", err, qmi.ErrServiceNotSupported.Error()) {
+		t.Fatal("ErrServiceNotSupported should not trigger service recovery")
+	}
+}
+
 func recoverableQMIError(service uint8, msg uint16) error {
 	return &qmi.QMIError{
 		Service:   service,
