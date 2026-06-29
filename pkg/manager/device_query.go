@@ -508,7 +508,13 @@ func (m *Manager) UIMPostSwitchReload(ctx context.Context, readiness UIMReadines
 	if err := m.UIMPowerCycleSIM(ctx, slot, opts.PowerCycleWait); err != nil {
 		return slot, err
 	}
-	if _, err := m.EnsureSIMProvisioned(ctx, EnsureSIMProvisionedOptions{DefaultSlot: slot}); err != nil {
+	if _, err := m.EnsureSIMProvisioned(ctx, EnsureSIMProvisionedOptions{
+		DefaultSlot:      slot,
+		MaxAttempts:      4,
+		MaxActivations:   1,
+		PollInterval:     400 * time.Millisecond,
+		ActivationSettle: 1500 * time.Millisecond,
+	}); err != nil {
 		return slot, err
 	}
 	return slot, nil
