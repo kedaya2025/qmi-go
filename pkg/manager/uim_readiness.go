@@ -17,6 +17,7 @@ const (
 	UIMReadinessCardResetting      UIMReadinessReason = "card_resetting"
 	UIMReadinessSIMBlocked         UIMReadinessReason = "sim_blocked"
 	UIMReadinessIdentityEmpty      UIMReadinessReason = "identity_empty"
+	UIMReadinessNeedsProvisioning  UIMReadinessReason = "needs_provisioning"
 )
 
 type UIMReadiness struct {
@@ -28,9 +29,12 @@ type UIMReadiness struct {
 	ActiveSlot     uint8
 	SlotKnown      bool
 	SlotSource     string
-	ICCID          string
-	IMSI           string
-	Reason         UIMReadinessReason
+	ICCID              string
+	IMSI               string
+	AppState           uint8
+	ProvisioningActive bool
+	NeedsProvisioning  bool
+	Reason             UIMReadinessReason
 	Err            error
 }
 
@@ -123,6 +127,9 @@ func buildUIMReadinessWithSlotError(status qmi.SIMStatus, details *qmi.CardStatu
 
 	out.CardPresent = status != qmi.SIMAbsent
 	if details != nil {
+		out.AppState = details.AppState
+		out.ProvisioningActive = details.AppState == qmi.UIMAppStateReady
+
 		switch details.CardState {
 		case 0x00:
 			out.CardPresent = false
@@ -138,6 +145,13 @@ func buildUIMReadinessWithSlotError(status qmi.SIMStatus, details *qmi.CardStatu
 		out.Reason = UIMReadinessSIMBlocked
 		return out
 	}
+
+	if out.CardPresent && details != nil && details.AppState == qmi.UIMAppStateDetected {
+		out.NeedsProvisioning = true
+		out.Reason = UIMReadinessNeedsProvisioning
+		return out
+	}
+
 	if status != qmi.SIMReady {
 		out.Reason = UIMReadinessCardResetting
 		return out
