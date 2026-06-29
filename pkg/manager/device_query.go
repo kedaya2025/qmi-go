@@ -422,11 +422,8 @@ func (m *Manager) UIMChangeProvisioningSession(ctx context.Context, req qmi.UIMC
 }
 
 type UIMPostSwitchReloadOptions struct {
-	DefaultSlot        uint8
-	PowerCycleWait     time.Duration
-	ProvisioningWait   time.Duration
-	USIMAID            []byte
-	RebindProvisioning bool
+	DefaultSlot    uint8
+	PowerCycleWait time.Duration
 }
 
 func normalizeUIMPostSwitchReloadOptions(opts UIMPostSwitchReloadOptions) UIMPostSwitchReloadOptions {
@@ -435,9 +432,6 @@ func normalizeUIMPostSwitchReloadOptions(opts UIMPostSwitchReloadOptions) UIMPos
 	}
 	if opts.PowerCycleWait <= 0 {
 		opts.PowerCycleWait = 500 * time.Millisecond
-	}
-	if opts.ProvisioningWait <= 0 {
-		opts.ProvisioningWait = 200 * time.Millisecond
 	}
 	return opts
 }
@@ -514,10 +508,8 @@ func (m *Manager) UIMPostSwitchReload(ctx context.Context, readiness UIMReadines
 	if err := m.UIMPowerCycleSIM(ctx, slot, opts.PowerCycleWait); err != nil {
 		return slot, err
 	}
-	if opts.RebindProvisioning {
-		if err := uimRebindPrimaryGWProvisioningWithSender(ctx, slot, opts.USIMAID, opts.ProvisioningWait, m.UIMChangeProvisioningSession); err != nil {
-			return slot, err
-		}
+	if _, err := m.EnsureSIMProvisioned(ctx, EnsureSIMProvisionedOptions{DefaultSlot: slot}); err != nil {
+		return slot, err
 	}
 	return slot, nil
 }
