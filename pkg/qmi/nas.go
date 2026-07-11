@@ -300,6 +300,30 @@ type CellLocationInfo struct {
 	NR5G  *NR5GCellLocationInfo
 }
 
+// activeBandToLTEBand maps the QMI NAS "active_band" enum value (as reported
+// in RF Band Information for radio_if == LTE) to the corresponding 3GPP
+// E-UTRA band number. The enum is not a simple offset from the band number
+// (e.g. band 17 comes before band 18 numerically in the enum but not in the
+// value space), so a lookup table is required. Values taken from libqmi's
+// QmiNasActiveBand (qmi-enums-nas.h).
+var activeBandToLTEBand = map[uint16]uint16{
+	120: 1, 121: 2, 122: 3, 123: 4, 124: 5, 125: 6, 126: 7, 127: 8, 128: 9,
+	129: 10, 130: 11, 131: 12, 132: 13, 133: 14, 134: 17,
+	143: 18, 144: 19, 145: 20, 146: 21, 152: 23, 147: 24, 148: 25, 153: 26,
+	164: 27, 158: 28, 159: 29, 160: 30, 165: 31, 154: 32,
+	135: 33, 136: 34, 137: 35, 138: 36, 139: 37, 140: 38, 141: 39, 142: 40,
+	149: 41, 150: 42, 151: 43, 163: 46, 166: 47, 167: 48,
+	161: 66, 168: 71, 155: 125, 156: 126, 157: 127, 162: 250,
+}
+
+// LTEBandNumberFromActiveBand converts a QMI NAS active_band enum value into
+// its real 3GPP E-UTRA band number. ok is false if the value has no known
+// LTE band mapping (e.g. it belongs to another RAT's band-class range).
+func LTEBandNumberFromActiveBand(active uint16) (band uint16, ok bool) {
+	band, ok = activeBandToLTEBand[active]
+	return band, ok
+}
+
 func GetLTEDuplexModeFromBandInfo(info *RFBandInfo) string {
 	if info == nil {
 		return ""
@@ -308,7 +332,11 @@ func GetLTEDuplexModeFromBandInfo(info *RFBandInfo) string {
 		if band.RadioInterface != 0x08 {
 			continue
 		}
-		if duplex := getLTEDuplexModeFromBand(band.ActiveBandClass); duplex != "" {
+		lteBand, ok := LTEBandNumberFromActiveBand(band.ActiveBandClass)
+		if !ok {
+			continue
+		}
+		if duplex := getLTEDuplexModeFromBand(lteBand); duplex != "" {
 			return duplex
 		}
 	}

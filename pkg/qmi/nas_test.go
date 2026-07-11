@@ -143,18 +143,21 @@ func TestGetLTEDuplexModeFromBandInfo(t *testing.T) {
 		want string
 	}{
 		{
+			// ActiveBandClass carries the raw QMI active_band enum value, not
+			// the plain 3GPP band number. QMI_NAS_ACTIVE_BAND_EUTRAN_8 = 127.
 			name: "lte band 8 is fdd",
-			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 8}}},
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 127}}},
 			want: "FDD",
 		},
 		{
+			// QMI_NAS_ACTIVE_BAND_EUTRAN_41 = 149.
 			name: "lte band 41 is tdd",
-			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 41}}},
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 149}}},
 			want: "TDD",
 		},
 		{
 			name: "non lte band is ignored",
-			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x04, ActiveBandClass: 8}}},
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x04, ActiveBandClass: 127}}},
 			want: "",
 		},
 	}
@@ -165,6 +168,27 @@ func TestGetLTEDuplexModeFromBandInfo(t *testing.T) {
 				t.Fatalf("GetLTEDuplexModeFromBandInfo()=%q want=%q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLTEBandNumberFromActiveBand(t *testing.T) {
+	tests := []struct {
+		active   uint16
+		wantBand uint16
+		wantOK   bool
+	}{
+		{active: 127, wantBand: 8, wantOK: true}, // matches the real device value from the bug report
+		{active: 120, wantBand: 1, wantOK: true},
+		{active: 134, wantBand: 17, wantOK: true}, // gap: EUTRAN_17 is not 120+16
+		{active: 149, wantBand: 41, wantOK: true}, // non-sequential region
+		{active: 80, wantBand: 0, wantOK: false},  // WCDMA range, not LTE
+	}
+
+	for _, tt := range tests {
+		gotBand, gotOK := LTEBandNumberFromActiveBand(tt.active)
+		if gotBand != tt.wantBand || gotOK != tt.wantOK {
+			t.Fatalf("LTEBandNumberFromActiveBand(%d)=(%d,%v) want=(%d,%v)", tt.active, gotBand, gotOK, tt.wantBand, tt.wantOK)
+		}
 	}
 }
 
