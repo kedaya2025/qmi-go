@@ -31,4 +31,5 @@ func openRawTransport(path string) (qmiTransport, error) {
 var (
 	openRawTransportHook   = openRawTransport
 	openProxyTransportHook = openProxyTransport
+	openQRTRTransportHook  = openQRTRTransport
 )

@@ -40,8 +40,7 @@ It doesn't wrap AT commands — it speaks QMI/QMUX directly over `/dev/cdc-wdm*`
 
 ## Current limits
 
-- Transport is `/dev/cdc-wdm*` + QMUX only for now
-- `IMSDCM` isn't supported — it needs a 16-bit service ID / `QRTR` path that a plain wrapper can't provide
+- Native `QRTR` (`AF_QIPCRTR`) transport is available (see below) but requires a kernel with `CONFIG_QRTR` and is less battle-tested than the default `/dev/cdc-wdm*` + QMUX path
 - Aimed at Linux host/container modem-management daemons, not a desktop GUI tool
 
 ## Layout
@@ -117,6 +116,7 @@ sudo ./qmi-go -s ims -n 2 -m 2
 | `-pin` | SIM PIN |
 | `-i` | network interface name, e.g. `wwan0` |
 | `-d` | control device path, e.g. `/dev/cdc-wdm0` |
+| `-qrtr` | use native `QRTR` (`AF_QIPCRTR`) transport for the QMI control channel instead of `-d`'s cdc-wdm device (see [QRTR transport](#qrtr-transport)) |
 | `-4` | IPv4 only |
 | `-6` | IPv6 only |
 | `-set-route` | write the default route (off by default) |
@@ -285,6 +285,40 @@ A set of small CLIs ship in the repo for protocol-level debugging:
 
 If you're wiring a service into higher-level code, it's usually worth checking the modem's raw response with one of these first.
 
+## QRTR transport
+
+Besides the default `/dev/cdc-wdm*` + QMUX path, `qmi-go` can talk QMI natively over `QRTR` (`AF_QIPCRTR`), bypassing the cdc-wdm character device entirely. It's implemented as a second `qmiTransport` — the transaction engine, TLV parsing, and indication dispatch in `pkg/qmi` are unchanged either way.
+
+Requirements:
+
+- Linux kernel with `CONFIG_QRTR` (and the relevant transport, e.g. `qrtr-mhi`) enabled and loaded
+- `root`, since `AF_QIPCRTR` sockets require it
+
+Enable it with `-qrtr` on any of the CLIs, or `UseQRTR: true` in code:
+
+```bash
+sudo ./qmi-go -qrtr -s internet
+sudo ./dms-tool -qrtr -action serial
+```
+
+```go
+client, err := qmi.NewClientWithOptions(ctx, "", qmi.ClientOptions{UseQRTR: true})
+```
+
+```go
+mgr := manager.New(manager.Config{
+	Device:        modems[0],
+	APN:           "internet",
+	ClientOptions: qmi.ClientOptions{UseQRTR: true},
+}, nil)
+```
+
+QRTR has no `CTL` service and no client-ID allocation of its own, so `qmi-go` locally simulates the handful of `CTL` messages it needs (`Sync`, `GetVersionInfo`, `GetClientID`, `ReleaseClientID`) instead of sending them over the wire, mirroring `libqmi`'s `qmi-endpoint-qrtr.c` approach. Service discovery is done via `QRTR` `NEW_LOOKUP`/`NEW_SERVER`, and each allocated client gets its own dedicated `QRTR` socket connected to the resolved service.
+
+This also lifts the 8-bit `QMUX` service-ID ceiling: `Packet.ServiceType` is 16-bit, so QRTR-only services beyond `0xFF` (e.g. `IMSDCM` at `0x302`) are addressable. Real `QMUX`/`qmi-proxy` traffic is unaffected — no service it ever exposes exceeds `0xFF`, so that path stays byte-for-byte identical to before.
+
+`-qrtr` and `-d`/`UseProxy` are mutually exclusive; `-qrtr` wins if both are set. `cmd/cm`'s device discovery (`pkg/device`) still scans USB/sysfs for a network interface and currently expects to find a `cdc-wdm` control path too, so a modem that exposes `QRTR` but no `cdc-wdm` node at all isn't discoverable yet by the `cm` CLI — use `qmi.NewClientWithOptions` directly against a manually-constructed `manager.ModemDevice` in that case.
+
 ## Good fit
 
 - 4G/5G always-on dial daemons
@@ -294,7 +328,6 @@ If you're wiring a service into higher-level code, it's usually worth checking t
 
 ## Not a good fit
 
-- Deep IMS bearer management that needs `QRTR`/`IMSDCM`
 - Non-Linux platforms
 - Wanting full coverage of every `libqmi` service
 - One-off commands where you don't want a code integration

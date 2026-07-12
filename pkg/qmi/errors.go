@@ -12,14 +12,14 @@ import (
 
 // QMIError represents a QMI protocol error / QMIError 表示 QMI 协议错误
 type QMIError struct {
-	Service   uint8  // QMI service type / QMI 服务类型
+	Service   uint16 // QMI service type / QMI 服务类型
 	MessageID uint16 // Message ID that caused the error / 导致错误的消息 ID
 	Result    uint16 // QMI result code / QMI 结果码
 	ErrorCode uint16 // QMI error code / QMI 错误码
 }
 
 func (e *QMIError) Error() string {
-	return fmt.Sprintf("QMI error: service=0x%02x msg=0x%04x result=0x%04x error=0x%04x",
+	return fmt.Sprintf("QMI error: service=0x%04x msg=0x%04x result=0x%04x error=0x%04x",
 		e.Service, e.MessageID, e.Result, e.ErrorCode)
 }
 
@@ -185,3 +185,8 @@ func IsTimeoutError(err error) bool {
 // ErrServiceNotSupported is returned when a requested service is not supported by the hardware
 // ErrServiceNotSupported 表示硬件不支持所请求的 QMI 服务
 var ErrServiceNotSupported = errors.New("qmi service not supported by hardware")
+
+// ErrQRTRUnsupported is returned when QRTR (AF_QIPCRTR) transport is requested on a
+// platform or build that cannot support it (non-Linux, or the running kernel lacks
+// CONFIG_QRTR). ErrQRTRUnsupported 表示当前平台或内核不支持 QRTR (AF_QIPCRTR) 传输。
+var ErrQRTRUnsupported = errors.New("qmi: QRTR (AF_QIPCRTR) transport is unsupported on this platform")

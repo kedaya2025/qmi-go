@@ -50,7 +50,7 @@ const (
 // Event represents an asynchronous indication from the modem / Event代表来自modem的异步指示
 type Event struct {
 	Type      EventType
-	ServiceID uint8
+	ServiceID uint16
 	MessageID uint16
 	Packet    *Packet
 }
@@ -78,7 +78,17 @@ type ClientOptions struct {
 	ProxyExecutable       string
 	ProxyOpenTimeout      time.Duration
 	ProxyFallbackToRaw    bool
-	Logf                  ClientLogFunc
+	// UseQRTR opens a native QRTR (AF_QIPCRTR) transport instead of a
+	// /dev/cdc-wdm* device or qmi-proxy socket. It takes precedence over
+	// UseProxy (QRTR has no shared cdc-wdm device to multiplex, so
+	// qmi-proxy semantics do not apply). The path argument to
+	// NewClientWithOptions is not used when UseQRTR is set.
+	// UseQRTR 打开原生 QRTR (AF_QIPCRTR) 传输，而非 /dev/cdc-wdm* 设备或
+	// qmi-proxy 套接字。其优先级高于 UseProxy（QRTR 没有可供多路复用的共享
+	// cdc-wdm 设备，qmi-proxy 语义不适用）。当 UseQRTR 设置时，
+	// NewClientWithOptions 的 path 参数不会被使用。
+	UseQRTR bool
+	Logf    ClientLogFunc
 }
 
 // DefaultClientOptions returns the production defaults used by NewClientWithOptions.
@@ -116,7 +126,7 @@ type coalescedEventStore struct {
 
 type transactionEntry struct {
 	ch       chan *Packet
-	service  uint8
+	service  uint16
 	msgID    uint16
 	txID     uint16
 	start    time.Time
@@ -124,7 +134,7 @@ type transactionEntry struct {
 }
 
 type recentTransaction struct {
-	service     uint8
+	service     uint16
 	msgID       uint16
 	txID        uint16
 	start       time.Time
@@ -162,7 +172,7 @@ type Client struct {
 	ctlTxID                uint32 // separate counter for CTL (1 byte) / CTL的独立计数器 (1字节)
 
 	// Client ID cache / 客户端ID缓存
-	clientIDs map[uint8]uint8 // service -> clientID / 服务 -> 客户端ID
+	clientIDs map[uint16]uint8 // service -> clientID / 服务 -> 客户端ID
 
 	// Event handling / 事件处理
 	eventCh           chan Event
@@ -257,7 +267,10 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 		conn qmiTransport
 		err  error
 	)
-	if opts.UseProxy {
+	switch {
+	case opts.UseQRTR:
+		conn, err = openQRTRTransportHook(openCtx, opts)
+	case opts.UseProxy:
 		conn, err = openProxyTransportHook(openCtx, opts)
 		if err != nil && opts.ProxyFallbackToRaw {
 			logClientOption(opts, ClientLogLevelWarn, "QMI: qmi-proxy transport unavailable, falling back to raw QMI for %s: %v", path, err)
@@ -267,7 +280,7 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 				return nil, fmt.Errorf("qmi-proxy unavailable and raw QMI fallback failed for %s: %w", path, err)
 			}
 		}
-	} else {
+	default:
 		conn, err = openRawTransportHook(path)
 	}
 	if err != nil {
@@ -276,7 +289,7 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 
 	c := newClientWithTransport(path, opts, conn)
 
-	if opts.UseProxy {
+	if opts.UseProxy && !opts.UseQRTR {
 		if err := c.openProxyDevice(openCtx, path); err != nil {
 			if opts.ProxyFallbackToRaw {
 				_ = c.Close()
@@ -336,19 +349,30 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 
 // HasService 查询 modem 是否支持指定的 QMI 服务。
 // 如果尚未执行版本查询，返回 true（乐观假设）。
-func (c *Client) HasService(service uint8) bool {
+func (c *Client) HasService(service uint16) bool {
 	if !c.versionQueried {
 		return true
 	}
-	_, ok := c.serviceVersions[service]
+	if service > 0xFF {
+		// CTL_GET_VERSION_INFO (the real QMI wire message this cache is
+		// built from) only ever enumerates 8-bit service IDs -- a genuine
+		// protocol ceiling, not a code limitation. We have no wire-level way
+		// to know whether a QRTR-only service > 0xFF is present, so stay
+		// optimistic rather than falsely reporting it unsupported.
+		return true
+	}
+	_, ok := c.serviceVersions[uint8(service)]
 	return ok
 }
 
-func (c *Client) ensureServiceAllocatable(service uint8) error {
+func (c *Client) ensureServiceAllocatable(service uint16) error {
 	if !c.versionQueried {
 		return nil
 	}
-	if _, ok := c.serviceVersions[service]; ok {
+	if service > 0xFF {
+		return nil // see HasService: CTL_GET_VERSION_INFO cannot enumerate services > 0xFF
+	}
+	if _, ok := c.serviceVersions[uint8(service)]; ok {
 		return nil
 	}
 	return ErrServiceNotSupported
@@ -375,7 +399,7 @@ func newClientWithTransport(path string, opts ClientOptions, conn qmiTransport) 
 		opts:               opts,
 		transactions:       make(map[uint32]*transactionEntry),
 		recentTransactions: make(map[uint32]recentTransaction),
-		clientIDs:          make(map[uint8]uint8),
+		clientIDs:          make(map[uint16]uint8),
 		eventCh:            make(chan Event, opts.IndicationQueueSize),
 		indicationInCh:     make(chan Event, opts.IndicationQueueSize),
 		coalescedSignalCh:  make(chan struct{}, 1),
@@ -475,7 +499,7 @@ func (c *Client) pruneRecentTransactionsLocked(now time.Time) {
 	}
 }
 
-func (c *Client) isRecentTransaction(key uint32, service uint8, msgID uint16) bool {
+func (c *Client) isRecentTransaction(key uint32, service uint16, msgID uint16) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	recent, ok := c.recentTransactions[key]
@@ -489,7 +513,7 @@ func (c *Client) isRecentTransaction(key uint32, service uint8, msgID uint16) bo
 	return recent.service == service && recent.msgID == msgID
 }
 
-func (c *Client) takeRecentTransaction(key uint32, service uint8, msgID uint16) (recentTransaction, bool) {
+func (c *Client) takeRecentTransaction(key uint32, service uint16, msgID uint16) (recentTransaction, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	recent, ok := c.recentTransactions[key]
@@ -573,9 +597,9 @@ func (c *Client) readLoop() {
 			if len(pending) < 3 {
 				break
 			}
-			if pending[0] != 0x01 {
+			if pending[0] != 0x01 && pending[0] != 0x02 {
 				i := 0
-				for i < len(pending) && pending[i] != 0x01 {
+				for i < len(pending) && pending[i] != 0x01 && pending[i] != 0x02 {
 					i++
 				}
 				if i == len(pending) {
@@ -872,11 +896,13 @@ func (c *Client) handleClientIDRevoke(p *Packet) {
 		return
 	}
 	tlv := FindTLV(p.TLVs, 0x01)
-	if tlv == nil || len(tlv.Value) < 2 {
+	if tlv == nil {
 		return
 	}
-	service := tlv.Value[0]
-	clientID := tlv.Value[1]
+	service, clientID, ok := decodeCTLServiceClientIDTLV(tlv.Value)
+	if !ok {
+		return
+	}
 
 	c.mu.Lock()
 	if cached, ok := c.clientIDs[service]; ok && cached == clientID {
@@ -890,7 +916,7 @@ func (c *Client) handleClientIDRevoke(p *Packet) {
 // ============================================================================
 
 // SendRequest sends a QMI request and waits for response / SendRequest发送QMI请求并等待响应
-func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8, msgID uint16, tlvs []TLV) (resp *Packet, err error) {
+func (c *Client) SendRequest(ctx context.Context, service uint16, clientID uint8, msgID uint16, tlvs []TLV) (resp *Packet, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1010,13 +1036,13 @@ func (c *Client) openProxyDevice(ctx context.Context, devicePath string) error {
 }
 
 // AllocateClientID requests a client ID for the given service / AllocateClientID为给定服务请求客户端ID
-func (c *Client) AllocateClientID(service uint8) (uint8, error) {
+func (c *Client) AllocateClientID(service uint16) (uint8, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	return c.AllocateClientIDWithContext(ctx, service)
 }
 
-func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8) (uint8, error) {
+func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint16) (uint8, error) {
 	if err := c.ensureServiceAllocatable(service); err != nil {
 		return 0, err
 	}
@@ -1026,7 +1052,7 @@ func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8)
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 20*time.Second)
 
 		// Build request: TLV 0x01 = service type / 构建请求: TLV 0x01 = 服务类型
-		tlvs := []TLV{NewTLVUint8(0x01, service)}
+		tlvs := []TLV{encodeCTLServiceOnlyTLV(service)}
 
 		resp, err := c.SendRequest(attemptCtx, ServiceControl, 0, CTLGetClientID, tlvs)
 		attemptCancel()
@@ -1037,11 +1063,14 @@ func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8)
 
 			// Parse response TLV 0x01: {service, clientID} / 解析响应 TLV 0x01: {服务, clientID}
 			tlv := FindTLV(resp.TLVs, 0x01)
-			if tlv == nil || len(tlv.Value) < 2 {
+			if tlv == nil {
+				return 0, fmt.Errorf("invalid response TLV")
+			}
+			_, clientID, ok := decodeCTLServiceClientIDTLV(tlv.Value)
+			if !ok {
 				return 0, fmt.Errorf("invalid response TLV")
 			}
 
-			clientID := tlv.Value[1]
 			c.mu.Lock()
 			c.clientIDs[service] = clientID
 			c.mu.Unlock()
@@ -1059,15 +1088,15 @@ func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8)
 }
 
 // ReleaseClientID releases a client ID for the given service / ReleaseClientID释放给定服务的客户端ID
-func (c *Client) ReleaseClientID(service uint8, clientID uint8) error {
+func (c *Client) ReleaseClientID(service uint16, clientID uint8) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return c.ReleaseClientIDWithContext(ctx, service, clientID)
 }
 
-func (c *Client) ReleaseClientIDWithContext(ctx context.Context, service uint8, clientID uint8) error {
+func (c *Client) ReleaseClientIDWithContext(ctx context.Context, service uint16, clientID uint8) error {
 	// Build request: TLV 0x01 = {service, clientID} / 构建请求: TLV 0x01 = {服务, clientID}
-	tlvs := []TLV{{Type: 0x01, Value: []byte{service, clientID}}}
+	tlvs := []TLV{encodeCTLServiceClientIDTLV(service, clientID)}
 
 	resp, err := c.SendRequest(ctx, ServiceControl, 0, CTLReleaseClientID, tlvs)
 	if err != nil {
@@ -1086,7 +1115,7 @@ func (c *Client) ReleaseClientIDWithContext(ctx context.Context, service uint8, 
 }
 
 // GetClientID returns the cached client ID for a service, or 0 if not allocated / GetClientID返回服务的缓存客户端ID，如果未分配则返回0
-func (c *Client) GetClientID(service uint8) uint8 {
+func (c *Client) GetClientID(service uint16) uint8 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.clientIDs[service]

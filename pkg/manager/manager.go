@@ -187,10 +187,10 @@ type Manager struct {
 	events  *EventEmitter // External event callbacks / 外部事件回调
 
 	// Reconnection / 重连相关
-	retryCount   int
-	retryDelays  []time.Duration
-	reinitDelays []time.Duration
-	isRotating   bool // Flag to suppress status checks during IP rotation / 标志位: IP轮换期间抑制状态检查
+	retryCount         int
+	retryDelays        []time.Duration
+	reinitDelays       []time.Duration
+	isRotating         bool // Flag to suppress status checks during IP rotation / 标志位: IP轮换期间抑制状态检查
 	recoverCount       int
 	recoverFirstFailAt time.Time // 本轮连续恢复失败的首次时间，用于 MaxRecoverElapsed 判据
 	lastIPCheck        time.Time
@@ -977,7 +977,7 @@ func (m *Manager) qmiIndicationEvent(eventType EventType, evt qmi.Event) Event {
 		Type:       eventType,
 		State:      m.State(),
 		RawQMIType: evt.Type,
-		ServiceID:  evt.ServiceID,
+		ServiceID:  uint8(evt.ServiceID),
 		MessageID:  evt.MessageID,
 	}
 }
@@ -2307,7 +2307,7 @@ func (m *Manager) setState(s State) {
 }
 
 type startupServiceTask struct {
-	run  func(context.Context) error
+	run func(context.Context) error
 }
 
 func (m *Manager) runStartupServiceTasks(ctx context.Context, fatal bool, tasks []startupServiceTask) error {
@@ -2363,7 +2363,7 @@ func (m *Manager) runStartupServiceTasks(ctx context.Context, fatal bool, tasks 
 
 // hasQMIService 检查底层 Client 是否声明支持该服务。
 // 仅在 client 初始化完成后调用有效。
-func (m *Manager) hasQMIService(service uint8) bool {
+func (m *Manager) hasQMIService(service uint16) bool {
 	if m.client == nil {
 		return false
 	}
@@ -3870,7 +3870,7 @@ func (m *Manager) indicationHandler() {
 
 func (m *Manager) handleIndication(evt qmi.Event) {
 	if shouldLogRawIndication(evt) {
-		m.log.Debugf("Indication: type=%d service=0x%02x msg=0x%04x", evt.Type, evt.ServiceID, evt.MessageID)
+		m.log.Debugf("Indication: type=%d service=0x%02x msg=0x%04x", evt.Type, uint8(evt.ServiceID), evt.MessageID)
 	}
 
 	switch evt.Type {
@@ -3911,7 +3911,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 					}
 					current, _ := m.snapshot.ServingSystem()
 					previousServing = current
-					
+
 					isChanged := false
 					if current != nil {
 						if hasServingTLV {
@@ -4077,7 +4077,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 				SMSIndex:    index,
 				StorageType: storage,
 				RawQMIType:  evt.Type,
-				ServiceID:   evt.ServiceID,
+				ServiceID:   uint8(evt.ServiceID),
 				MessageID:   evt.MessageID,
 			})
 		} else if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 6 {
@@ -4105,7 +4105,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 				SMSTransactionID: transactionID,
 				SMSFormat:        format,
 				RawQMIType:       evt.Type,
-				ServiceID:        evt.ServiceID,
+				ServiceID:        uint8(evt.ServiceID),
 				MessageID:        evt.MessageID,
 			})
 		} else {
@@ -4115,7 +4115,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 				State:      m.State(),
 				SMSIndex:   0xFFFFFFFF,
 				RawQMIType: evt.Type,
-				ServiceID:  evt.ServiceID,
+				ServiceID:  uint8(evt.ServiceID),
 				MessageID:  evt.MessageID,
 			})
 		}
@@ -4131,7 +4131,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:           m.State(),
 			IMSRegistration: info,
 			RawQMIType:      evt.Type,
-			ServiceID:       evt.ServiceID,
+			ServiceID:       uint8(evt.ServiceID),
 			MessageID:       evt.MessageID,
 		})
 
@@ -4146,7 +4146,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:       m.State(),
 			IMSServices: info,
 			RawQMIType:  evt.Type,
-			ServiceID:   evt.ServiceID,
+			ServiceID:   uint8(evt.ServiceID),
 			MessageID:   evt.MessageID,
 		})
 
@@ -4161,7 +4161,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:       m.State(),
 			IMSSettings: info,
 			RawQMIType:  evt.Type,
-			ServiceID:   evt.ServiceID,
+			ServiceID:   uint8(evt.ServiceID),
 			MessageID:   evt.MessageID,
 		})
 
@@ -4176,7 +4176,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:      m.State(),
 			VoiceCalls: info,
 			RawQMIType: evt.Type,
-			ServiceID:  evt.ServiceID,
+			ServiceID:  uint8(evt.ServiceID),
 			MessageID:  evt.MessageID,
 		})
 
@@ -4191,7 +4191,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:              m.State(),
 			VoiceSupplementary: info,
 			RawQMIType:         evt.Type,
-			ServiceID:          evt.ServiceID,
+			ServiceID:          uint8(evt.ServiceID),
 			MessageID:          evt.MessageID,
 		})
 
@@ -4206,7 +4206,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:                     m.State(),
 			VoiceSupplementaryRequest: info,
 			RawQMIType:                evt.Type,
-			ServiceID:                 evt.ServiceID,
+			ServiceID:                 uint8(evt.ServiceID),
 			MessageID:                 evt.MessageID,
 		})
 
@@ -4221,7 +4221,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:      m.State(),
 			VoiceUSSD:  info,
 			RawQMIType: evt.Type,
-			ServiceID:  evt.ServiceID,
+			ServiceID:  uint8(evt.ServiceID),
 			MessageID:  evt.MessageID,
 		})
 
@@ -4230,7 +4230,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			Type:       EventVoiceUSSDReleased,
 			State:      m.State(),
 			RawQMIType: evt.Type,
-			ServiceID:  evt.ServiceID,
+			ServiceID:  uint8(evt.ServiceID),
 			MessageID:  evt.MessageID,
 		})
 
@@ -4245,7 +4245,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			State:           m.State(),
 			VoiceUSSDNoWait: info,
 			RawQMIType:      evt.Type,
-			ServiceID:       evt.ServiceID,
+			ServiceID:       uint8(evt.ServiceID),
 			MessageID:       evt.MessageID,
 		})
 

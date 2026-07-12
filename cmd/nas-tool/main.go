@@ -14,9 +14,10 @@ import (
 func main() {
 	devicePath := flag.String("device", defaultQmiDevice(), "Path to QMI device")
 	action := flag.String("action", "all", "Action: all, serving, signal, signal-info, sysinfo, scan, register, dump")
+	useQRTR := flag.Bool("qrtr", false, "Use native QRTR (AF_QIPCRTR) transport instead of a cdc-wdm device")
 	flag.Parse()
 
-	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{UseQRTR: *useQRTR})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}

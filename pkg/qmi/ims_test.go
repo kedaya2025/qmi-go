@@ -259,7 +259,7 @@ func TestParseIMSPGetEnablerStateResponse(t *testing.T) {
 func TestDispatchIMSIndications(t *testing.T) {
 	c := &Client{eventCh: make(chan Event, 8)}
 	cases := []struct {
-		service uint8
+		service uint16
 		msgID   uint16
 		want    EventType
 	}{

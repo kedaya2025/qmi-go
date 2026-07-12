@@ -22,9 +22,9 @@ func buildVersionInfoTLV(services []ServiceVersion) []byte {
 func TestParseServiceVersionListNormal(t *testing.T) {
 	// 构造 3 个服务：WDS v1.30, DMS v1.14, NAS v1.20
 	input := []ServiceVersion{
-		{ServiceType: ServiceWDS, Major: 1, Minor: 30},
-		{ServiceType: ServiceDMS, Major: 1, Minor: 14},
-		{ServiceType: ServiceNAS, Major: 1, Minor: 20},
+		{ServiceType: uint8(ServiceWDS), Major: 1, Minor: 30},
+		{ServiceType: uint8(ServiceDMS), Major: 1, Minor: 14},
+		{ServiceType: uint8(ServiceNAS), Major: 1, Minor: 20},
 	}
 	tlvData := buildVersionInfoTLV(input)
 	tlvs := []TLV{{Type: 0x01, Value: tlvData}}
@@ -76,7 +76,7 @@ func TestParseServiceVersionListMissingTLV(t *testing.T) {
 
 func TestParseServiceVersionListTruncated(t *testing.T) {
 	// count=2 但只提供 1 个条目的数据 (期望 11 字节，只有 6 字节)
-	data := []byte{0x02, ServiceWDS, 0x01, 0x00, 0x1E, 0x00}
+	data := []byte{0x02, byte(ServiceWDS), 0x01, 0x00, 0x1E, 0x00}
 	tlvs := []TLV{{Type: 0x01, Value: data}}
 	_, err := parseServiceVersionList(tlvs)
 	if err == nil {
@@ -95,27 +95,27 @@ func TestParseServiceVersionListTLVTooShort(t *testing.T) {
 
 func TestServiceVersionMap(t *testing.T) {
 	versions := []ServiceVersion{
-		{ServiceType: ServiceWDS, Major: 1, Minor: 30},
-		{ServiceType: ServiceUIM, Major: 1, Minor: 46},
-		{ServiceType: ServiceNAS, Major: 1, Minor: 20},
+		{ServiceType: uint8(ServiceWDS), Major: 1, Minor: 30},
+		{ServiceType: uint8(ServiceUIM), Major: 1, Minor: 46},
+		{ServiceType: uint8(ServiceNAS), Major: 1, Minor: 20},
 	}
 	m := ServiceVersionMap(versions)
 
 	// 应该能找到的
-	if v, ok := m[ServiceWDS]; !ok {
+	if v, ok := m[uint8(ServiceWDS)]; !ok {
 		t.Fatal("WDS not found in map")
 	} else if v.Major != 1 || v.Minor != 30 {
 		t.Errorf("WDS version = %+v, want {1, 30}", v)
 	}
-	if _, ok := m[ServiceUIM]; !ok {
+	if _, ok := m[uint8(ServiceUIM)]; !ok {
 		t.Fatal("UIM not found in map")
 	}
-	if _, ok := m[ServiceNAS]; !ok {
+	if _, ok := m[uint8(ServiceNAS)]; !ok {
 		t.Fatal("NAS not found in map")
 	}
 
 	// 不应该找到的
-	if _, ok := m[ServiceVOICE]; ok {
+	if _, ok := m[uint8(ServiceVOICE)]; ok {
 		t.Fatal("VOICE should not be in map")
 	}
 }
@@ -141,8 +141,8 @@ func TestHasServiceBeforeQuery(t *testing.T) {
 func TestHasServiceAfterQuery(t *testing.T) {
 	c := &Client{
 		serviceVersions: map[uint8]ServiceVersion{
-			ServiceWDS: {ServiceType: ServiceWDS, Major: 1, Minor: 30},
-			ServiceNAS: {ServiceType: ServiceNAS, Major: 1, Minor: 20},
+			uint8(ServiceWDS): {ServiceType: uint8(ServiceWDS), Major: 1, Minor: 30},
+			uint8(ServiceNAS): {ServiceType: uint8(ServiceNAS), Major: 1, Minor: 20},
 		},
 		versionQueried: true,
 	}
@@ -168,7 +168,7 @@ func TestGetCachedServiceVersionsBeforeQuery(t *testing.T) {
 
 func TestGetCachedServiceVersionsAfterQuery(t *testing.T) {
 	original := map[uint8]ServiceVersion{
-		ServiceWDS: {ServiceType: ServiceWDS, Major: 1, Minor: 30},
+		uint8(ServiceWDS): {ServiceType: uint8(ServiceWDS), Major: 1, Minor: 30},
 	}
 	c := &Client{
 		serviceVersions: original,
@@ -178,12 +178,12 @@ func TestGetCachedServiceVersionsAfterQuery(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(result))
 	}
-	if _, ok := result[ServiceWDS]; !ok {
+	if _, ok := result[uint8(ServiceWDS)]; !ok {
 		t.Fatal("WDS not found in cached versions")
 	}
 
 	// 验证返回的是拷贝而非原始引用
-	result[ServiceNAS] = ServiceVersion{ServiceType: ServiceNAS}
+	result[uint8(ServiceNAS)] = ServiceVersion{ServiceType: uint8(ServiceNAS)}
 	if len(c.serviceVersions) != 1 {
 		t.Fatal("modifying returned map should not affect original")
 	}

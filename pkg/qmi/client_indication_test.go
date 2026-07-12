@@ -37,7 +37,7 @@ func TestDispatchIndicationClassifiesNASEventReportSeparately(t *testing.T) {
 		closeCh:            make(chan struct{}),
 		transactions:       make(map[uint32]*transactionEntry),
 		recentTransactions: make(map[uint32]recentTransaction),
-		clientIDs:          make(map[uint8]uint8),
+		clientIDs:          make(map[uint16]uint8),
 	}
 
 	c.dispatchIndication(&Packet{

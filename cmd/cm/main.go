@@ -10,6 +10,7 @@ import (
 
 	"github.com/iniwex5/qmi-go/pkg/device"
 	"github.com/iniwex5/qmi-go/pkg/manager"
+	"github.com/iniwex5/qmi-go/pkg/qmi"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -26,6 +27,7 @@ var (
 	// Interface selection / 接口选择
 	ifaceName = flag.String("i", "", "Network interface name (e.g., wwan0) / 网络接口名称")
 	devPath   = flag.String("d", "", "Control device path (e.g., /dev/cdc-wdm0) / 控制设备路径")
+	useQRTR   = flag.Bool("qrtr", false, "Use native QRTR (AF_QIPCRTR) transport for the QMI control channel instead of the cdc-wdm device / 使用原生 QRTR (AF_QIPCRTR) 传输代替 cdc-wdm 设备作为 QMI 控制通道")
 
 	// IP version / IP版本
 	ipv4Only = flag.Bool("4", false, "IPv4 only / 仅IPv4")
@@ -140,6 +142,7 @@ func main() {
 		NoDNS:         !*setDNS,
 		ProfileIndex:  uint8(*profileIndex),
 		MuxID:         uint8(*muxID),
+		ClientOptions: qmi.ClientOptions{UseQRTR: *useQRTR},
 	}
 
 	// Create and start manager / 创建并启动管理器

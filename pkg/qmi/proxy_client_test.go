@@ -86,12 +86,12 @@ func TestClientProxyAllocateClientIDAfterOpen(t *testing.T) {
 			return err
 		}
 		tlv := FindTLV(allocReq.TLVs, 0x01)
-		if tlv == nil || len(tlv.Value) != 1 || tlv.Value[0] != ServiceDMS {
+		if tlv == nil || len(tlv.Value) != 1 || tlv.Value[0] != byte(ServiceDMS) {
 			return fmt.Errorf("allocate client ID TLV = %#v, want service DMS", tlv)
 		}
 		return writeCTLResponse(conn, allocReq, []TLV{
 			successTLV(),
-			{Type: 0x01, Value: []byte{ServiceDMS, clientID}},
+			{Type: 0x01, Value: []byte{byte(ServiceDMS), clientID}},
 		})
 	})
 
@@ -164,12 +164,12 @@ func TestAllocateClientIDWithContextUnknownServiceCacheFallsThrough(t *testing.T
 			return err
 		}
 		tlv := FindTLV(allocReq.TLVs, 0x01)
-		if tlv == nil || len(tlv.Value) != 1 || tlv.Value[0] != ServiceWMS {
+		if tlv == nil || len(tlv.Value) != 1 || tlv.Value[0] != byte(ServiceWMS) {
 			return fmt.Errorf("allocate client ID TLV = %#v, want service WMS", tlv)
 		}
 		return writeCTLResponse(conn, allocReq, []TLV{
 			successTLV(),
-			{Type: 0x01, Value: []byte{ServiceWMS, clientID}},
+			{Type: 0x01, Value: []byte{byte(ServiceWMS), clientID}},
 		})
 	})
 
@@ -197,7 +197,6 @@ func TestAllocateClientIDWithContextUnknownServiceCacheFallsThrough(t *testing.T
 		t.Fatal(err)
 	}
 }
-
 
 func TestClientFallsBackToRawWhenProxyTransportOpenFails(t *testing.T) {
 	const devicePath = "/dev/cdc-wdm-fallback0"
@@ -401,7 +400,7 @@ func writeCTLResponse(conn net.Conn, req *Packet, tlvs []TLV) error {
 		IFType:       0x01,
 		Length:       uint16(len(body) + 5),
 		ControlFlags: 0x00,
-		ServiceType:  req.ServiceType,
+		ServiceType:  uint8(req.ServiceType),
 		ClientID:     req.ClientID,
 	}
 	frame := qmuxHeader.Marshal()

@@ -39,7 +39,7 @@ func TestServiceNotSupportedDoesNotTriggerRecovery(t *testing.T) {
 	}
 }
 
-func recoverableQMIError(service uint8, msg uint16) error {
+func recoverableQMIError(service uint16, msg uint16) error {
 	return &qmi.QMIError{
 		Service:   service,
 		MessageID: msg,

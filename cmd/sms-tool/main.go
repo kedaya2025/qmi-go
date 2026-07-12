@@ -18,10 +18,11 @@ func main() {
 	storage := flag.Int("storage", 1, "Storage type (0=UIM, 1=NV)")
 	tag := flag.Int("tag", 1, "Message tag for delete-tag/modify-tag (0=Read, 1=NotRead, 2=Sent, 3=NotSent)")
 	allTags := flag.Bool("all-tags", false, "For list action: query all tags (noisy on some modems)")
+	useQRTR := flag.Bool("qrtr", false, "Use native QRTR (AF_QIPCRTR) transport instead of a cdc-wdm device")
 	flag.Parse()
 
 	// Initialize client
-	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{UseQRTR: *useQRTR})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}

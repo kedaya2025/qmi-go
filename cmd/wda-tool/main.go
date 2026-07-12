@@ -16,9 +16,10 @@ func main() {
 	action := flag.String("action", "all", "Action: all, get-format, set-rawip, set-eth, get-qmap, set-qmap, loopback-on, loopback-off, dump")
 	qmapInBand := flag.Int("qmap-inband", 0, "QMAP InBandFlowControl for set-qmap (0/1)")
 	replicate := flag.Uint("replicate", 0, "Replication factor for loopback-on")
+	useQRTR := flag.Bool("qrtr", false, "Use native QRTR (AF_QIPCRTR) transport instead of a cdc-wdm device")
 	flag.Parse()
 
-	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{UseQRTR: *useQRTR})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}

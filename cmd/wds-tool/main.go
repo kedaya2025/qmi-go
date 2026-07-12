@@ -17,9 +17,10 @@ func main() {
 	action := flag.String("action", "all", "Action: all, status, runtime4, runtime6, profiles, profile, dump")
 	profileType := flag.Int("profile-type", 0, "Profile type (0=3GPP, 1=3GPP2)")
 	profileIndex := flag.Int("profile-index", 1, "Profile index for profile action")
+	useQRTR := flag.Bool("qrtr", false, "Use native QRTR (AF_QIPCRTR) transport instead of a cdc-wdm device")
 	flag.Parse()
 
-	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{UseQRTR: *useQRTR})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}
